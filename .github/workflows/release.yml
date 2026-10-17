@@ -80,8 +80,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          path: dl
-          pattern: bundle-*
+          name: bundle-windows-aarch64
+          path: dl/bundle-windows-aarch64
       - name: Archiver et empreinte
         run: |
           set -euo pipefail
