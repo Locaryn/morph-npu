@@ -1,0 +1,100 @@
+{
+  "$schema": "https://locaryn.dev/schema/morph.json/v0.1",
+  "apiVersion": "0.1",
+  "name": "morph-npu",
+  "version": "0.1.0-beta.1",
+  "description": "Runtime NPU pour Snapdragon : llama.cpp avec le NPU Hexagon et le GPU Adreno (Windows ARM64). Télécharge au premier usage le runtime Locaryn/llama-snapdragon, avec empreinte SHA-256 vérifiée.",
+  "author": "Locaryn Team",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/Locaryn/morph-npu",
+  "repository": "https://github.com/Locaryn/morph-npu",
+  "keywords": [
+    "npu",
+    "hexagon",
+    "snapdragon",
+    "llama.cpp",
+    "inference-engine"
+  ],
+  "permissions": {
+    "network": {
+      "reason": "Télécharger le runtime (github.com/Locaryn/llama-snapdragon, empreinte SHA-256 vérifiée) au premier démarrage.",
+      "requireApproval": true
+    },
+    "shell": {
+      "reason": "Lancer llama-server, le serveur d'inférence téléchargé, en local (127.0.0.1 uniquement).",
+      "requireApproval": true
+    },
+    "files.read": {
+      "reason": "Lire les modèles choisis."
+    },
+    "files.write": {
+      "reason": "Installer le runtime dans le dossier privé de l'extension."
+    }
+  },
+  "components": {
+    "skills": [
+      "SKILL.md"
+    ]
+  },
+  "capabilities": [
+    "inference-engine",
+    "npu"
+  ],
+  "engine": {
+    "id": "npu",
+    "label": "NPU Snapdragon (llama.cpp)",
+    "driver": "openai_compat",
+    "api_url": "http://127.0.0.1:8189",
+    "port": 8189,
+    "install": {
+      "kind": "binary"
+    },
+    "lifecycle": {
+      "start": [
+        "{{plugin_bin_dir}}/locaryn-npu-launch",
+        "serve",
+        "--port",
+        "{{port}}",
+        "--model",
+        "{{model_path}}"
+      ],
+      "health": {
+        "method": "GET",
+        "url": "{{endpoint}}/health",
+        "retries": 300,
+        "interval_ms": 2000
+      },
+      "requires_model": true
+    },
+    "model_formats": {
+      "files": [
+        "gguf"
+      ]
+    },
+    "startup_timeout_secs": 1800,
+    "requires": {
+      "os": [
+        "windows"
+      ],
+      "arch": [
+        "aarch64"
+      ],
+      "note": "Windows ARM64 (Snapdragon) uniquement. Le NPU ne s'active qu'après activer-npu.ps1, lancé une fois en administrateur, puis redémarrage du PC (mode test-signing : filigrane « Mode de test »)."
+    }
+  },
+  "platforms": [
+    "windows"
+  ],
+  "beta": true,
+  "stability": "untested",
+  "versions": [
+    {
+      "version": "0.1.0-beta.1",
+      "is_beta": true,
+      "summary": "Première version : runtime llama.cpp b11003 Snapdragon (NPU Hexagon, GPU Adreno) téléchargé et vérifié au premier usage. Non testé sur un NPU réel à la publication.",
+      "tag": "v0.1.0-beta.1",
+      "released_at": "2026-10-17",
+      "install_source": "Locaryn/morph-npu#v0.1.0-beta.1"
+    }
+  ]
+}

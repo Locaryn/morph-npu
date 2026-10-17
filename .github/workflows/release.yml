@@ -1,0 +1,101 @@
+name: Release morph-npu
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Vérifier la compilation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --all-targets --locked
+      - name: Vérifier le manifeste
+        run: node -e "JSON.parse(require('fs').readFileSync('morph.json','utf8'))"
+
+  bundle:
+    name: Bundle windows-aarch64 (Snapdragon)
+    needs: check
+    # Seul Windows ARM64 : le NPU Hexagon n'existe que sur Snapdragon.
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-pc-windows-msvc
+      - name: Compiler le lanceur
+        run: cargo build --release --locked --target aarch64-pc-windows-msvc --bin locaryn-npu-launch
+      - name: Assembler le paquet
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf bundle
+          mkdir -p bundle/bin
+          cp morph.json SKILL.md README.md LICENSE bundle/
+          cp target/aarch64-pc-windows-msvc/release/locaryn-npu-launch.exe bundle/bin/
+          test -f bundle/bin/locaryn-npu-launch.exe
+      # Le runtime Visual C++ ARM64, à côté du lanceur : le lanceur le pose à
+      # côté de llama-server quand le système ne l'a pas (dépôt local autorisé
+      # par Microsoft, sans installation ni droits d'administrateur).
+      - name: Joindre le runtime Visual C++ ARM64
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC" -Directory |
+            Sort-Object Name -Descending |
+            ForEach-Object { Get-ChildItem (Join-Path $_.FullName arm64) -Directory -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue } |
+            Select-Object -First 1
+          if (-not $crt) { throw "runtime Visual C++ arm64 introuvable dans $vs" }
+          New-Item -ItemType Directory -Force bundle/bin/vcrt | Out-Null
+          Copy-Item "$($crt.FullName)\*.dll" bundle/bin/vcrt/
+          if (-not (Test-Path bundle/bin/vcrt/vcruntime140.dll) -or -not (Test-Path bundle/bin/vcrt/msvcp140.dll)) { throw "vcruntime140.dll ou msvcp140.dll manquant" }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bundle-windows-aarch64
+          path: bundle
+          if-no-files-found: error
+
+  release:
+    name: Publier la release
+    needs: bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dl
+          pattern: bundle-*
+      - name: Archiver et empreinte
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' morph.json | head -n 1)"
+          test -n "$VERSION"
+          mkdir -p out
+          chmod +x dl/bundle-windows-aarch64/bin/* || true
+          ( cd dl/bundle-windows-aarch64 && zip -r -q "$GITHUB_WORKSPACE/out/morph-npu-v${VERSION}-windows-aarch64.zip" . )
+          ( cd out && sha256sum *.zip | tee SHA256SUMS.txt )
+          unzip -l out/*.zip | grep -q "bin/locaryn-npu-launch.exe"
+          unzip -l out/*.zip | grep -q "bin/vcrt/msvcp140.dll"
+      - uses: softprops/action-gh-release@v3
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: out/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
