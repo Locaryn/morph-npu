@@ -1,15 +1,20 @@
 //! Quel build du runtime convient à cette machine.
 
-/// Le seul build de ce morph : llama.cpp Snapdragon (NPU Hexagon, GPU Adreno),
-/// pour Windows ARM64.
+/// Les deux chemins vers le NPU de ce morph, pour Windows ARM64.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
+    /// Microsoft Foundry Local (fournisseur QNN signé par Qualcomm) : aucun
+    /// réglage de sécurité à toucher. Modèles du catalogue Foundry seulement.
+    Foundry,
+    /// llama.cpp Snapdragon (NPU Hexagon, GPU Adreno) : fichiers GGUF, mais
+    /// exige le mode test-signing de Windows.
     Npu,
 }
 
 impl Backend {
     pub fn name(self) -> &'static str {
         match self {
+            Backend::Foundry => "foundry",
             Backend::Npu => "npu",
         }
     }
@@ -43,8 +48,9 @@ pub fn choose(demande: &str, os: &str, arch: &str) -> Result<Backend, String> {
         ));
     }
     match demande.trim() {
-        "" | "auto" | "npu" => Ok(Backend::Npu),
-        autre => Err(format!("backend « {autre} » inconnu (auto, npu)")),
+        "" | "auto" | "foundry" => Ok(Backend::Foundry),
+        "llamacpp" | "llama.cpp" | "npu" | "hexagon" => Ok(Backend::Npu),
+        autre => Err(format!("backend « {autre} » inconnu (foundry, llamacpp)")),
     }
 }
 
@@ -65,7 +71,12 @@ mod tests {
 
     #[test]
     fn seul_le_snapdragon_est_accepte() {
-        assert_eq!(choose("auto", "windows", "aarch64"), Ok(Backend::Npu));
+        assert_eq!(choose("auto", "windows", "aarch64"), Ok(Backend::Foundry));
+        assert_eq!(
+            choose("foundry", "windows", "aarch64"),
+            Ok(Backend::Foundry)
+        );
+        assert_eq!(choose("llamacpp", "windows", "aarch64"), Ok(Backend::Npu));
         assert_eq!(choose("npu", "windows", "aarch64"), Ok(Backend::Npu));
         assert!(choose("auto", "windows", "x86_64").is_err());
         assert!(choose("auto", "linux", "aarch64").is_err());

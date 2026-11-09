@@ -1,4 +1,4 @@
-# Autorise le NPU Hexagon pour le moteur Locaryn sur un PC Snapdragon (Windows ARM).
+﻿# Autorise le NPU Hexagon pour le moteur Locaryn sur un PC Snapdragon (Windows ARM).
 #
 # À lancer VOUS-MÊME, dans un PowerShell ouvert en administrateur, puis
 # redémarrer le PC. Ce script :

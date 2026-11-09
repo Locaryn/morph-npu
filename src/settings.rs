@@ -9,9 +9,13 @@ pub const RUNTIME_REPO: &str = "Locaryn/llama-snapdragon";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
-    /// `auto` ou `npu`.
+    /// `foundry` (défaut, `auto` aussi) ou `llamacpp` (Hexagon, mode test).
     #[serde(default = "backend_auto")]
     pub backend: String,
+    /// Modèle Foundry Local : `auto`, un alias du catalogue (`phi-4-mini`) ou
+    /// l'identifiant exact d'une variante NPU. Ignoré par llama.cpp.
+    #[serde(default = "foundry_auto")]
+    pub foundry_model: String,
     /// Taille du contexte. 8192 laisse de la place au modèle sur une carte de 6 Go.
     #[serde(default = "contexte_defaut", deserialize_with = "nombre")]
     pub context_size: u32,
@@ -40,6 +44,9 @@ pub struct Settings {
 }
 
 fn backend_auto() -> String {
+    "auto".into()
+}
+fn foundry_auto() -> String {
     "auto".into()
 }
 fn contexte_defaut() -> u32 {
@@ -81,6 +88,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             backend: backend_auto(),
+            foundry_model: foundry_auto(),
             context_size: contexte_defaut(),
             vision: false,
             gpu_layers: couches_defaut(),

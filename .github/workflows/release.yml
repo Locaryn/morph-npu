@@ -55,6 +55,7 @@ jobs:
           test -f bundle/bin/locaryn-npu-launch.exe
           test -f bundle/bin/locaryn-npu-mcp.exe
           test -f bundle/scripts/activer-npu.ps1
+          test -f bundle/scripts/installer-foundry.ps1
       # Le runtime Visual C++ ARM64, à côté du lanceur : le lanceur le pose à
       # côté de llama-server quand le système ne l'a pas (dépôt local autorisé
       # par Microsoft, sans installation ni droits d'administrateur).
@@ -98,6 +99,7 @@ jobs:
           unzip -l out/*.zip | grep -q "bin/locaryn-npu-launch.exe"
           unzip -l out/*.zip | grep -q "bin/locaryn-npu-mcp.exe"
           unzip -l out/*.zip | grep -q "scripts/activer-npu.ps1"
+          unzip -l out/*.zip | grep -q "scripts/installer-foundry.ps1"
           unzip -l out/*.zip | grep -q "bin/vcrt/msvcp140.dll"
       - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')

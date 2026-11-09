@@ -1,13 +1,12 @@
 ---
 name: morph-npu
-description: Moteur d'inférence local sur NPU Hexagon et GPU Adreno (Snapdragon, Windows ARM64). Utiliser pour exécuter un modèle GGUF sur un PC Snapdragon avec le NPU.
+description: Moteur d'inférence local sur le NPU des PC Snapdragon (Windows ARM64). Par défaut Microsoft Foundry Local (modèles du catalogue Foundry, aucun mode test) ; en option llama.cpp Hexagon pour les fichiers GGUF.
 ---
 
 # morph-npu
 
-Lance `llama-server` avec le backend Hexagon (NPU) du fork Locaryn/llama-snapdragon.
-
 - Fonctionne uniquement sur Windows ARM64 (Snapdragon). Ailleurs, le lanceur refuse de démarrer.
-- Le NPU exige `activer-npu.ps1` (administrateur, une fois, puis redémarrage). Sans cela, le runtime se lance sans NPU.
-- Le lanceur télécharge le runtime au premier usage et vérifie son empreinte SHA-256.
+- Moteur par défaut (`backend` = `foundry`) : Microsoft Foundry Local, installé au premier usage par winget. Le NPU passe par le pilote QNN signé par Qualcomm : ni mode test, ni Secure Boot à couper. Modèles du catalogue Foundry seulement (réglage `foundry_model`, `auto` par défaut) ; un GGUF n'est pas accepté.
+- `backend` = `llamacpp` : llama.cpp Hexagon pour les GGUF ; exige le mode test-signing (bouton « Activer le mode test », administrateur, puis redémarrage).
+- Outils : `npu_etat` (le NPU est-il utilisé ?), `npu_modeles` (modèles NPU du catalogue), `npu_foundry_installer`, `npu_activer`.
 - Serveur lié à 127.0.0.1 uniquement.

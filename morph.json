@@ -2,8 +2,8 @@
   "$schema": "https://locaryn.dev/schema/morph.json/v0.1",
   "apiVersion": "0.1",
   "name": "morph-npu",
-  "version": "0.1.0-beta.2",
-  "description": "Runtime NPU pour Snapdragon : llama.cpp avec le NPU Hexagon et le GPU Adreno (Windows ARM64). Télécharge au premier usage le runtime Locaryn/llama-snapdragon, avec empreinte SHA-256 vérifiée.",
+  "version": "0.1.0-beta.3",
+  "description": "Moteur NPU pour Snapdragon (Windows ARM64). Par défaut, Microsoft Foundry Local : le NPU par le fournisseur QNN signé par Qualcomm, sans mode test ni Secure Boot à couper (modèles du catalogue Foundry). En option, llama.cpp Hexagon pour les fichiers GGUF (exige le mode test-signing).",
   "author": "Locaryn Team",
   "license": "Apache-2.0",
   "homepage": "https://github.com/Locaryn/morph-npu",
@@ -12,19 +12,21 @@
     "npu",
     "hexagon",
     "snapdragon",
+    "foundry-local",
+    "qnn",
     "llama.cpp",
     "inference-engine"
   ],
   "permissions": {
     "mcp": {
-      "reason": "Servir le bouton « Activer le NPU » des réglages."
+      "reason": "Servir les boutons des réglages : installer Foundry Local, lister les modèles NPU, vérifier, activer le mode test."
     },
     "network": {
-      "reason": "Télécharger le runtime (github.com/Locaryn/llama-snapdragon, empreinte SHA-256 vérifiée) au premier démarrage.",
+      "reason": "Installer Foundry Local (winget, Microsoft) et ses modèles NPU au premier usage ; en mode llama.cpp, télécharger le runtime (github.com/Locaryn/llama-snapdragon, empreinte SHA-256 vérifiée).",
       "requireApproval": true
     },
     "shell": {
-      "reason": "Lancer llama-server en local (127.0.0.1 uniquement), et activer-npu.ps1 en administrateur quand vous cliquez « Activer le NPU ».",
+      "reason": "Lancer la CLI foundry et winget (Foundry Local) ou llama-server (127.0.0.1 uniquement) ; activer-npu.ps1 en administrateur seulement si vous cliquez « Activer le mode test ».",
       "requireApproval": true
     },
     "files.read": {
@@ -39,21 +41,60 @@
       {
         "id": "npu",
         "title": "NPU",
-        "description": "Autoriser le NPU Hexagon de ce PC Snapdragon.",
+        "description": "Par défaut, Foundry Local utilise le NPU sans toucher à la sécurité de Windows.",
         "fields": [
           {
-            "key": "activer",
-            "label": "Activer le NPU",
+            "key": "backend",
+            "label": "Moteur",
+            "kind": "select",
+            "options": [
+              "foundry",
+              "llamacpp"
+            ],
+            "default": "foundry",
+            "hint": "foundry (recommandé) : Microsoft Foundry Local, NPU par le pilote signé de Qualcomm, aucun mode test. Modèles du catalogue Foundry uniquement, pas de GGUF. llamacpp : fichiers GGUF sur le NPU Hexagon, mais exige le mode test-signing de Windows (bouton plus bas)."
+          },
+          {
+            "key": "foundry_model",
+            "label": "Modèle Foundry",
+            "kind": "string",
+            "default": "auto",
+            "hint": "« auto » prend un petit modèle NPU (qwen2.5-1.5b, sinon phi-4-mini…). Sinon, un nom donné par « Lister les modèles NPU » (ex. phi-4-mini). Les fichiers GGUF ne sont pas acceptés dans ce mode. Relancez le moteur après un changement."
+          },
+          {
+            "key": "installer_foundry",
+            "label": "Installer Foundry Local",
             "kind": "action",
-            "tool": "npu_activer",
-            "hint": "Windows demande l'autorisation administrateur (UAC). Le script ajoute le certificat de Locaryn et active le mode test-signing (filigrane « Mode de test » ; Secure Boot doit parfois être coupé dans l'UEFI). Redémarrez ensuite le PC."
+            "tool": "npu_foundry_installer",
+            "hint": "Normalement inutile : le moteur l'installe seul au premier lancement. À utiliser si cette installation a échoué ; Windows peut demander l'autorisation."
+          },
+          {
+            "key": "modeles",
+            "label": "Lister les modèles NPU",
+            "kind": "action",
+            "tool": "npu_modeles",
+            "hint": "Affiche les modèles du catalogue Foundry qui tournent sur le NPU de ce PC."
           },
           {
             "key": "etat",
             "label": "Vérifier",
             "kind": "action",
             "tool": "npu_etat",
-            "hint": "Dit si le NPU est déjà autorisé sur ce PC."
+            "hint": "Dit si le NPU est réellement utilisé, et par quel modèle."
+          }
+        ]
+      },
+      {
+        "id": "npu-llamacpp",
+        "title": "NPU — mode llama.cpp (avancé)",
+        "description": "Seulement si « Moteur » vaut llamacpp.",
+        "fields": [
+          {
+            "key": "activer",
+            "label": "Activer le mode test",
+            "kind": "action",
+            "tool": "npu_activer",
+            "hint": "Uniquement pour le moteur llamacpp. Windows demande l'autorisation administrateur (UAC). Le script ajoute le certificat de Locaryn et active le mode test-signing (filigrane « Mode de test » ; Secure Boot doit parfois être coupé dans l'UEFI). Redémarrez ensuite le PC. Inutile avec Foundry Local."
           }
         ]
       }
@@ -71,7 +112,7 @@
   ],
   "engine": {
     "id": "npu",
-    "label": "NPU Snapdragon (llama.cpp)",
+    "label": "NPU Snapdragon",
     "driver": "openai_compat",
     "api_url": "http://127.0.0.1:8189",
     "port": 8189,
@@ -90,10 +131,10 @@
       "health": {
         "method": "GET",
         "url": "{{endpoint}}/health",
-        "retries": 300,
+        "retries": 900,
         "interval_ms": 2000
       },
-      "requires_model": true
+      "requires_model": false
     },
     "model_formats": {
       "files": [
@@ -108,7 +149,7 @@
       "arch": [
         "aarch64"
       ],
-      "note": "Windows ARM64 (Snapdragon) uniquement. Le NPU ne s'active qu'après activer-npu.ps1, lancé une fois en administrateur, puis redémarrage du PC (mode test-signing : filigrane « Mode de test »)."
+      "note": "Windows 11 ARM64 (Snapdragon X) uniquement. Par défaut, Foundry Local s'installe seul et utilise le NPU sans mode test. Le mode llama.cpp, lui, exige le mode test-signing."
     }
   },
   "platforms": [
@@ -117,6 +158,14 @@
   "beta": true,
   "stability": "untested",
   "versions": [
+    {
+      "version": "0.1.0-beta.3",
+      "is_beta": true,
+      "summary": "Nouveau moteur par défaut : Microsoft Foundry Local, le NPU par le pilote signé de Qualcomm, sans mode test ni Secure Boot coupé. Installation automatique, choix du modèle NPU, bouton « Vérifier ». llama.cpp Hexagon reste disponible (réglage « Moteur »).",
+      "tag": "v0.1.0-beta.3",
+      "released_at": "2026-11-09",
+      "install_source": "Locaryn/morph-npu#v0.1.0-beta.3"
+    },
     {
       "version": "0.1.0-beta.2",
       "is_beta": true,

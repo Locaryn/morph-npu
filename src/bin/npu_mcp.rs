@@ -2,8 +2,15 @@
 //!
 //! - `npu_activer` lance `activer-npu.ps1` en administrateur : Windows affiche
 //!   sa demande d'autorisation (UAC), la personne accepte ou refuse.
-//! - `npu_etat` dit si le NPU est déjà autorisé (mode test-signing actif).
+//! - `npu_etat` (« Vérifier ») dit si le NPU est utilisé : en mode Foundry
+//!   Local, quel modèle est chargé et sur quel appareil ; en mode llama.cpp,
+//!   si le mode test-signing est actif.
+//! - `npu_modeles` liste les modèles NPU du catalogue Foundry Local.
+//! - `npu_foundry_installer` installe Foundry Local (fenêtre visible, UAC
+//!   seulement si Windows l'exige).
 
+use locaryn_plugin_npu::backend::{self, Backend};
+use locaryn_plugin_npu::{foundry, settings};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -68,6 +75,8 @@ fn repondre(methode: &str, params: &Value) -> Result<Value, String> {
             let (texte, erreur) = match nom {
                 "npu_activer" => resultat(activer()),
                 "npu_etat" => resultat(etat()),
+                "npu_modeles" => resultat(modeles()),
+                "npu_foundry_installer" => resultat(installer_foundry()),
                 autre => (format!("outil inconnu : {autre}"), true),
             };
             Ok(json!({
@@ -95,7 +104,17 @@ fn outils() -> Value {
         },
         {
             "name": "npu_etat",
-            "description": "Dit si le NPU est autorisé sur ce PC (mode test-signing de Windows actif).",
+            "description": "Dit si le NPU est utilisé : modèle chargé par Foundry Local et son appareil, ou mode test-signing pour llama.cpp.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "npu_modeles",
+            "description": "Liste les modèles NPU du catalogue Foundry Local (alias à copier dans le réglage « Modèle Foundry »).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "npu_foundry_installer",
+            "description": "Installe Microsoft Foundry Local (winget) dans une fenêtre visible ; Windows demande l'autorisation seulement s'il l'exige.",
             "inputSchema": { "type": "object", "properties": {} }
         }
     ])
@@ -161,10 +180,127 @@ fn activer() -> Result<Value, String> {
     }))
 }
 
+/// Le moteur choisi dans les réglages du morph.
+fn backend_choisi() -> Result<Backend, String> {
+    let r = settings::Settings::load()?;
+    backend::choose(&r.backend, "windows", "aarch64")
+}
+
 fn etat() -> Result<Value, String> {
     if !cfg!(windows) {
         return Err("Le NPU Snapdragon n'existe que sous Windows.".into());
     }
+    match backend_choisi()? {
+        Backend::Foundry => etat_foundry(),
+        Backend::Npu => etat_test_signing(),
+    }
+}
+
+/// Un modèle Foundry tourne sur le NPU quand sa variante est QNN/NPU.
+fn sur_npu(nom: &str) -> bool {
+    let n = nom.to_ascii_lowercase();
+    n.contains("npu") || n.contains("qnn")
+}
+
+fn message_foundry(charges: &[String]) -> (bool, String) {
+    let npu: Vec<&String> = charges.iter().filter(|c| sur_npu(c)).collect();
+    if let Some(m) = npu.first() {
+        return (
+            true,
+            format!("Le NPU est utilisé : {m} tourne sur le NPU (fournisseur QNN de Qualcomm, sans mode test)."),
+        );
+    }
+    if let Some(m) = charges.first() {
+        return (
+            false,
+            format!("{m} est chargé, mais pas sur le NPU (variante CPU ou GPU). Choisissez un modèle NPU dans « Modèle Foundry »."),
+        );
+    }
+    (
+        false,
+        "Foundry Local tourne, mais aucun modèle n'est chargé : lancez le moteur NPU dans Locaryn (Réglages → Moteur).".into(),
+    )
+}
+
+fn etat_foundry() -> Result<Value, String> {
+    let Some(exe) = foundry::trouver() else {
+        return Ok(json!({
+            "npu_utilise": false,
+            "message": "Foundry Local n'est pas installé. Il s'installe au premier lancement du moteur, ou cliquez « Installer Foundry Local »."
+        }));
+    };
+    let Some(url) = foundry::url_service(&exe) else {
+        return Ok(json!({
+            "npu_utilise": false,
+            "message": "Foundry Local est installé mais arrêté : lancez le moteur NPU dans Locaryn (Réglages → Moteur)."
+        }));
+    };
+    let charges = foundry::modeles_charges(&exe, &url)?;
+    let (actif, message) = message_foundry(&charges);
+    Ok(
+        json!({ "npu_utilise": actif, "modeles_charges": charges, "service": url, "message": message }),
+    )
+}
+
+fn modeles() -> Result<Value, String> {
+    let exe = foundry::trouver()
+        .ok_or("Foundry Local n'est pas installé : cliquez d'abord « Installer Foundry Local ».")?;
+    let url = foundry::demarrer(&exe)?;
+    let npu: Vec<foundry::ModeleFoundry> = foundry::catalogue(&exe, &url)?
+        .into_iter()
+        .filter(foundry::ModeleFoundry::est_npu)
+        .collect();
+    if npu.is_empty() {
+        return Err("Aucun modèle NPU au catalogue : vérifiez que le pilote du NPU Snapdragon est à jour (Windows Update).".into());
+    }
+    let lignes: Vec<String> = npu
+        .iter()
+        .map(|m| match m.taille_mo {
+            Some(t) => format!("{} ({:.1} Go)", m.alias, t as f64 / 1024.0),
+            None => m.alias.clone(),
+        })
+        .collect();
+    Ok(json!({
+        "modeles": npu,
+        "message": format!(
+            "Modèles NPU : {}. Copiez un nom dans « Modèle Foundry », enregistrez, puis relancez le moteur.",
+            lignes.join(", ")
+        )
+    }))
+}
+
+fn installer_foundry() -> Result<Value, String> {
+    if !cfg!(windows) {
+        return Err("Foundry Local ne s'installe ici que sous Windows.".into());
+    }
+    let chemin = script("installer-foundry.ps1")?;
+    let chemin_ps = chemin.display().to_string().replace('\'', "''");
+    // Fenêtre visible, sans élévation : le script ne demande l'administrateur
+    // que si winget échoue sans.
+    let commande = format!(
+        "Start-Process -FilePath powershell.exe -ArgumentList \
+         '-NoProfile','-ExecutionPolicy','Bypass','-NoExit','-File','\"{chemin_ps}\"'"
+    );
+    let mut c = Command::new("powershell.exe");
+    c.args(["-NoProfile", "-NonInteractive", "-Command", &commande]);
+    sans_console(&mut c);
+    let sortie = c
+        .output()
+        .map_err(|e| format!("PowerShell introuvable : {e}"))?;
+    if !sortie.status.success() {
+        eprintln!(
+            "[npu-mcp] installation non lancée : {}",
+            String::from_utf8_lossy(&sortie.stderr)
+        );
+        return Err("La fenêtre d'installation ne s'est pas ouverte : réessayez.".into());
+    }
+    Ok(json!({
+        "message": "Installation de Foundry Local lancée dans une fenêtre : quand elle affiche « Terminé », lancez le moteur NPU."
+    }))
+}
+
+/// Mode llama.cpp : le NPU n'est accessible qu'en mode test-signing.
+fn etat_test_signing() -> Result<Value, String> {
     // Lisible sans droits administrateur : la ligne `testsigning` du
     // chargeur de démarrage actuel.
     let mut c = Command::new("powershell.exe");
@@ -190,4 +326,39 @@ fn etat() -> Result<Value, String> {
             "Le NPU n'est pas encore autorisé : cliquez « Activer le NPU », acceptez la demande Windows, puis redémarrez."
         }
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn un_modele_qnn_est_reconnu_sur_le_npu() {
+        let (actif, m) = message_foundry(&["Phi-4-mini-instruct-qnn-npu:2".into()]);
+        assert!(actif);
+        assert!(m.contains("NPU est utilisé"));
+        let (actif, m) = message_foundry(&["Phi-4-mini-instruct-generic-cpu".into()]);
+        assert!(!actif);
+        assert!(m.contains("pas sur le NPU"));
+        assert!(!message_foundry(&[]).0);
+    }
+
+    #[test]
+    fn les_outils_des_reglages_sont_declares() {
+        let o = outils();
+        let noms: Vec<&str> = o
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        for attendu in [
+            "npu_activer",
+            "npu_etat",
+            "npu_modeles",
+            "npu_foundry_installer",
+        ] {
+            assert!(noms.contains(&attendu), "{attendu}");
+        }
+    }
 }
