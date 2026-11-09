@@ -1,6 +1,6 @@
 [package]
 name = "locaryn-plugin-npu"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2021"
 description = "Runtime NPU Hexagon et GPU Adreno pour Snapdragon (Windows ARM64), basé sur Locaryn/llama-snapdragon"
 license = "Apache-2.0"
@@ -11,6 +11,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "locaryn-npu-launch"
 path = "src/main.rs"
+
+[[bin]]
+name = "locaryn-npu-mcp"
+path = "src/bin/npu_mcp.rs"
 
 [dependencies]
 flate2 = "1"

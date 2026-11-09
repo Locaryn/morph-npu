@@ -41,7 +41,7 @@ jobs:
         with:
           key: aarch64-pc-windows-msvc
       - name: Compiler le lanceur
-        run: cargo build --release --locked --target aarch64-pc-windows-msvc --bin locaryn-npu-launch
+        run: cargo build --release --locked --target aarch64-pc-windows-msvc --bins
       - name: Assembler le paquet
         shell: bash
         run: |
@@ -50,7 +50,11 @@ jobs:
           mkdir -p bundle/bin
           cp morph.json SKILL.md README.md LICENSE bundle/
           cp target/aarch64-pc-windows-msvc/release/locaryn-npu-launch.exe bundle/bin/
+          cp target/aarch64-pc-windows-msvc/release/locaryn-npu-mcp.exe bundle/bin/
+          cp -r scripts mcp bundle/
           test -f bundle/bin/locaryn-npu-launch.exe
+          test -f bundle/bin/locaryn-npu-mcp.exe
+          test -f bundle/scripts/activer-npu.ps1
       # Le runtime Visual C++ ARM64, à côté du lanceur : le lanceur le pose à
       # côté de llama-server quand le système ne l'a pas (dépôt local autorisé
       # par Microsoft, sans installation ni droits d'administrateur).
@@ -92,6 +96,8 @@ jobs:
           ( cd dl/bundle-windows-aarch64 && zip -r -q "$GITHUB_WORKSPACE/out/morph-npu-v${VERSION}-windows-aarch64.zip" . )
           ( cd out && sha256sum *.zip | tee SHA256SUMS.txt )
           unzip -l out/*.zip | grep -q "bin/locaryn-npu-launch.exe"
+          unzip -l out/*.zip | grep -q "bin/locaryn-npu-mcp.exe"
+          unzip -l out/*.zip | grep -q "scripts/activer-npu.ps1"
           unzip -l out/*.zip | grep -q "bin/vcrt/msvcp140.dll"
       - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')

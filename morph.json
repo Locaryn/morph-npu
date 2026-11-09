@@ -2,7 +2,7 @@
   "$schema": "https://locaryn.dev/schema/morph.json/v0.1",
   "apiVersion": "0.1",
   "name": "morph-npu",
-  "version": "0.1.0-beta.1",
+  "version": "0.1.0-beta.2",
   "description": "Runtime NPU pour Snapdragon : llama.cpp avec le NPU Hexagon et le GPU Adreno (Windows ARM64). Télécharge au premier usage le runtime Locaryn/llama-snapdragon, avec empreinte SHA-256 vérifiée.",
   "author": "Locaryn Team",
   "license": "Apache-2.0",
@@ -16,12 +16,15 @@
     "inference-engine"
   ],
   "permissions": {
+    "mcp": {
+      "reason": "Servir le bouton « Activer le NPU » des réglages."
+    },
     "network": {
       "reason": "Télécharger le runtime (github.com/Locaryn/llama-snapdragon, empreinte SHA-256 vérifiée) au premier démarrage.",
       "requireApproval": true
     },
     "shell": {
-      "reason": "Lancer llama-server, le serveur d'inférence téléchargé, en local (127.0.0.1 uniquement).",
+      "reason": "Lancer llama-server en local (127.0.0.1 uniquement), et activer-npu.ps1 en administrateur quand vous cliquez « Activer le NPU ».",
       "requireApproval": true
     },
     "files.read": {
@@ -31,10 +34,36 @@
       "reason": "Installer le runtime dans le dossier privé de l'extension."
     }
   },
+  "ui_contributions": {
+    "settings_sections": [
+      {
+        "id": "npu",
+        "title": "NPU",
+        "description": "Autoriser le NPU Hexagon de ce PC Snapdragon.",
+        "fields": [
+          {
+            "key": "activer",
+            "label": "Activer le NPU",
+            "kind": "action",
+            "tool": "npu_activer",
+            "hint": "Windows demande l'autorisation administrateur (UAC). Le script ajoute le certificat de Locaryn et active le mode test-signing (filigrane « Mode de test » ; Secure Boot doit parfois être coupé dans l'UEFI). Redémarrez ensuite le PC."
+          },
+          {
+            "key": "etat",
+            "label": "Vérifier",
+            "kind": "action",
+            "tool": "npu_etat",
+            "hint": "Dit si le NPU est déjà autorisé sur ce PC."
+          }
+        ]
+      }
+    ]
+  },
   "components": {
     "skills": [
       "SKILL.md"
-    ]
+    ],
+    "mcp": "mcp/mcp.json"
   },
   "capabilities": [
     "inference-engine",
@@ -88,6 +117,14 @@
   "beta": true,
   "stability": "untested",
   "versions": [
+    {
+      "version": "0.1.0-beta.2",
+      "is_beta": true,
+      "summary": "Bouton « Activer le NPU » dans les réglages du morph : la demande d'autorisation Windows s'ouvre, plus besoin de chercher le script ; bouton « Vérifier »",
+      "tag": "v0.1.0-beta.2",
+      "released_at": "2026-11-09",
+      "install_source": "Locaryn/morph-npu#v0.1.0-beta.2"
+    },
     {
       "version": "0.1.0-beta.1",
       "is_beta": true,

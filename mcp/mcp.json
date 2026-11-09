@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "npu": {
+      "command": "${LOCARYN_MORPH_ROOT}/bin/locaryn-npu-mcp",
+      "args": [],
+      "transport": "stdio",
+      "auto_start": true
+    }
+  }
+}
