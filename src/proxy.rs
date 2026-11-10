@@ -23,6 +23,9 @@ pub type Relance = Box<dyn Fn() -> Result<Amont, String> + Send + Sync>;
 /// Charge sur Foundry le modèle demandé par son nom ; rend le nouvel amont.
 pub type Changement = Box<dyn Fn(&str) -> Result<Amont, String> + Send + Sync>;
 
+/// Retire du disque le modèle nommé.
+pub type Suppression = Box<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
+
 /// L'état partagé du relais.
 pub struct Relais {
     amont: Mutex<Option<Amont>>,
@@ -32,6 +35,10 @@ pub struct Relais {
     modeles: Mutex<Vec<String>>,
     /// Nom court de chaque modèle servi (`phi-4-mini`), par identifiant.
     noms: Mutex<std::collections::HashMap<String, String>>,
+    /// Ceux qui sont déjà téléchargés sur ce PC.
+    installes: Mutex<std::collections::HashSet<String>>,
+    /// Supprime un modèle téléchargé (`DELETE /v1/models/<id>`).
+    suppression: Mutex<Option<Suppression>>,
     changement: Option<Changement>,
 }
 
@@ -42,6 +49,8 @@ impl Relais {
             relance,
             modeles: Mutex::new(Vec::new()),
             noms: Mutex::new(std::collections::HashMap::new()),
+            installes: Mutex::new(std::collections::HashSet::new()),
+            suppression: Mutex::new(None),
             changement: None,
         })
     }
@@ -54,6 +63,8 @@ impl Relais {
             relance,
             modeles: Mutex::new(Vec::new()),
             noms: Mutex::new(std::collections::HashMap::new()),
+            installes: Mutex::new(std::collections::HashSet::new()),
+            suppression: Mutex::new(None),
             changement: Some(changement),
         })
     }
@@ -62,6 +73,49 @@ impl Relais {
         if let Ok(mut m) = self.modeles.lock() {
             *m = modeles;
         }
+    }
+
+    pub fn definir_installes(&self, installes: std::collections::HashSet<String>) {
+        if let Ok(mut i) = self.installes.lock() {
+            *i = installes;
+        }
+    }
+
+    fn installes(&self) -> std::collections::HashSet<String> {
+        self.installes.lock().map(|i| i.clone()).unwrap_or_default()
+    }
+
+    pub fn definir_suppression(&self, suppression: Suppression) {
+        if let Ok(mut s) = self.suppression.lock() {
+            *s = Some(suppression);
+        }
+    }
+
+    /// Supprime `id` s'il fait partie des modèles servis.
+    fn supprimer(&self, id: &str) -> Result<(), String> {
+        if !self.modeles().iter().any(|m| m.eq_ignore_ascii_case(id)) {
+            return Err(format!("{id} n'est pas un modèle de cette passerelle"));
+        }
+        let garde = self
+            .suppression
+            .lock()
+            .map_err(|_| "état du relais corrompu".to_string())?;
+        let supprimer = garde
+            .as_ref()
+            .ok_or("cette passerelle ne sait pas supprimer de modèle")?;
+        supprimer(id)?;
+        if let Ok(mut i) = self.installes.lock() {
+            i.retain(|m| !m.eq_ignore_ascii_case(id));
+        }
+        // Le modèle chargé vient de disparaître : plus d'amont à son nom.
+        if let Ok(mut a) = self.amont.lock() {
+            if let Some(courant) = a.as_mut() {
+                if courant.modele.eq_ignore_ascii_case(id) {
+                    courant.modele.clear();
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn definir_noms(&self, noms: std::collections::HashMap<String, String>) {
@@ -190,6 +244,7 @@ pub fn reecrire_modele(corps: &[u8], modele: &str) -> Vec<u8> {
 pub fn liste_modeles(
     modeles: &[String],
     noms: &std::collections::HashMap<String, String>,
+    installes: &std::collections::HashSet<String>,
 ) -> Value {
     json!({
         "object": "list",
@@ -197,7 +252,13 @@ pub fn liste_modeles(
             .iter()
             .map(|m| {
                 let nom = noms.get(m).map_or(m.as_str(), String::as_str);
-                json!({ "id": m, "name": nom, "object": "model", "owned_by": "foundry-local" })
+                json!({
+                    "id": m,
+                    "name": nom,
+                    "object": "model",
+                    "owned_by": "foundry-local",
+                    "installed": installes.contains(m),
+                })
             })
             .collect::<Vec<_>>()
     })
@@ -320,11 +381,27 @@ fn servir_connexion(relais: &Relais, mut s: TcpStream) -> std::io::Result<()> {
         ("GET", "/v1/models") => {
             let servis = relais.modeles();
             match relais.courant() {
-                _ if !servis.is_empty() => {
-                    repondre_json(&mut s, 200, &liste_modeles(&servis, &relais.noms()))
-                }
-                Some(a) => repondre_json(&mut s, 200, &liste_modeles(&[a.modele], &relais.noms())),
+                _ if !servis.is_empty() => repondre_json(
+                    &mut s,
+                    200,
+                    &liste_modeles(&servis, &relais.noms(), &relais.installes()),
+                ),
+                Some(a) => repondre_json(
+                    &mut s,
+                    200,
+                    &liste_modeles(&[a.modele], &relais.noms(), &relais.installes()),
+                ),
                 None => repondre_json(&mut s, 503, &json!({"object": "list", "data": []})),
+            }
+        }
+        ("DELETE", c) if c.starts_with("/v1/models/") => {
+            let id = c.trim_start_matches("/v1/models/");
+            match relais.supprimer(id) {
+                Ok(()) => repondre_json(&mut s, 200, &json!({"id": id, "deleted": true})),
+                Err(e) => {
+                    eprintln!("[npu] suppression de {id} : {e}");
+                    repondre_json(&mut s, 409, &json!({"error": {"message": e}}))
+                }
             }
         }
         _ => transmettre(relais, &req, &mut s),

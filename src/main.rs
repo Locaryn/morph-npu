@@ -171,6 +171,18 @@ fn servis(exe: &Path, base: &str) -> Result<Vec<(String, String)>, String> {
         .collect())
 }
 
+/// Parmi `ids`, ceux qui sont déjà dans le cache de Foundry.
+fn telecharges(exe: &Path, ids: &[String]) -> std::collections::HashSet<String> {
+    let presents: Vec<String> = foundry::installes(exe)
+        .iter()
+        .map(|p| p.to_ascii_lowercase())
+        .collect();
+    ids.iter()
+        .filter(|id| presents.contains(&id.to_ascii_lowercase()))
+        .cloned()
+        .collect()
+}
+
 /// Téléchargements en cours, pour n'en lancer qu'un par modèle.
 static TELECHARGEMENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -246,7 +258,17 @@ fn passerelle(argv: &[String]) -> Result<u8, String> {
         modeles.len()
     );
     relais.definir_noms(modeles.iter().cloned().collect());
-    relais.definir_modeles(modeles.into_iter().map(|(id, _)| id).collect());
+    let ids: Vec<String> = modeles.into_iter().map(|(id, _)| id).collect();
+    relais.definir_installes(telecharges(&exe, &ids));
+    relais.definir_modeles(ids.clone());
+    let exe_suppr = exe.clone();
+    relais.definir_suppression(Box::new(move |id| foundry::supprimer(&exe_suppr, id)));
+    // Un téléchargement qui finit doit se voir sans relancer la passerelle.
+    let (suivi, exe_suivi) = (std::sync::Arc::clone(&relais), exe.clone());
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(20));
+        suivi.definir_installes(telecharges(&exe_suivi, &ids));
+    });
     relais.definir(foundry::Amont {
         base,
         modele: String::new(),

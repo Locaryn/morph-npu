@@ -1,6 +1,6 @@
 [package]
 name = "locaryn-plugin-npu"
-version = "0.1.0-beta.6"
+version = "0.1.0-beta.7"
 edition = "2021"
 description = "Moteur NPU Snapdragon (Windows ARM64) : Microsoft Foundry Local par défaut, llama.cpp Hexagon en option"
 license = "Apache-2.0"
