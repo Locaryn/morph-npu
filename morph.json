@@ -2,8 +2,8 @@
   "$schema": "https://locaryn.dev/schema/morph.json/v0.1",
   "apiVersion": "0.1",
   "name": "morph-npu",
-  "version": "0.1.0-beta.3",
-  "description": "Moteur NPU pour Snapdragon (Windows ARM64). Par défaut, Microsoft Foundry Local : le NPU par le fournisseur QNN signé par Qualcomm, sans mode test ni Secure Boot à couper (modèles du catalogue Foundry). En option, llama.cpp Hexagon pour les fichiers GGUF (exige le mode test-signing).",
+  "version": "0.1.0-beta.4",
+  "description": "Moteur NPU pour Snapdragon (Windows ARM64). Les modèles NPU téléchargés dans Microsoft Foundry Local apparaissent dans le sélecteur de modèles (fournisseur « NPU ») et se chargent quand on les choisit : NPU par le pilote signé de Qualcomm, sans mode test ni Secure Boot à couper. Rien n'est téléchargé sans votre demande. En option, llama.cpp Hexagon pour les fichiers GGUF (exige le mode test-signing).",
   "author": "Locaryn Team",
   "license": "Apache-2.0",
   "homepage": "https://github.com/Locaryn/morph-npu",
@@ -59,7 +59,21 @@
             "label": "Modèle Foundry",
             "kind": "string",
             "default": "auto",
-            "hint": "« auto » prend un petit modèle NPU (qwen2.5-1.5b, sinon phi-4-mini…). Sinon, un nom donné par « Lister les modèles NPU » (ex. phi-4-mini). Les fichiers GGUF ne sont pas acceptés dans ce mode. Relancez le moteur après un changement."
+            "hint": "Nom d'un modèle NPU (voir « Lister les modèles NPU »), pour le télécharger ou le supprimer avec les boutons ci-dessous. Les modèles téléchargés apparaissent d'eux-mêmes dans le sélecteur de modèles, fournisseur « NPU » : rien d'autre à activer. « auto » ne télécharge jamais rien."
+          },
+          {
+            "key": "telecharger",
+            "label": "Télécharger le modèle",
+            "kind": "action",
+            "tool": "npu_telecharger",
+            "hint": "Télécharge le modèle nommé ci-dessus dans Foundry Local, en arrière-plan."
+          },
+          {
+            "key": "supprimer",
+            "label": "Supprimer le modèle",
+            "kind": "action",
+            "tool": "npu_supprimer",
+            "hint": "Retire de Foundry Local le modèle nommé ci-dessus et libère sa place sur le disque."
           },
           {
             "key": "installer_foundry",
@@ -73,7 +87,7 @@
             "label": "Lister les modèles NPU",
             "kind": "action",
             "tool": "npu_modeles",
-            "hint": "Affiche les modèles du catalogue Foundry qui tournent sur le NPU de ce PC."
+            "hint": "Les modèles NPU de ce PC : ceux déjà téléchargés, ceux à télécharger, et le dossier où Foundry les range."
           },
           {
             "key": "etat",
@@ -110,6 +124,26 @@
     "inference-engine",
     "npu"
   ],
+  "cloud_provider": {
+    "id": "npu",
+    "label": "NPU (Foundry Local)",
+    "api_url": "http://127.0.0.1:8190",
+    "models_url": "http://127.0.0.1:8190/v1/models",
+    "docs_url": "https://learn.microsoft.com/azure/ai-foundry/foundry-local/",
+    "key_required": false,
+    "refresh_hours": 0,
+    "local": {
+      "start": [
+        "{{morph_dir}}/bin/locaryn-npu-launch.exe",
+        "gateway",
+        "--port",
+        "8190"
+      ],
+      "health_url": "http://127.0.0.1:8190/health",
+      "start_timeout_seconds": 600,
+      "install_hint": "Windows 11 ARM64 (Snapdragon X). Foundry Local s'installe seul au premier démarrage."
+    }
+  },
   "engine": {
     "id": "npu",
     "label": "NPU Snapdragon",
@@ -158,6 +192,14 @@
   "beta": true,
   "stability": "untested",
   "versions": [
+    {
+      "version": "0.1.0-beta.4",
+      "is_beta": true,
+      "summary": "Les modèles NPU téléchargés dans Foundry apparaissent dans le sélecteur (fournisseur « NPU ») et se chargent au choix ; plus aucun téléchargement non demandé ; boutons Télécharger et Supprimer, dossier des modèles affiché",
+      "tag": "v0.1.0-beta.4",
+      "released_at": "2026-11-10",
+      "install_source": "Locaryn/morph-npu#v0.1.0-beta.4"
+    },
     {
       "version": "0.1.0-beta.3",
       "is_beta": true,

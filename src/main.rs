@@ -3,6 +3,9 @@
 //!   serve --port N [--model CHEMIN]   prépare le moteur choisi, puis le sert sur N
 //!   install                           installe le moteur choisi sans rien lancer
 //!   status                            dit ce qui serait utilisé, en JSON
+//!   gateway --port N                  sert tous les modèles NPU déjà
+//!                                     téléchargés dans Foundry, chacun chargé
+//!                                     quand une conversation le demande
 //!
 //! Le moteur vient du réglage `backend` : Foundry Local (défaut) ou llama.cpp.
 
@@ -58,6 +61,7 @@ fn run() -> Result<u8, String> {
             Ok(0)
         }
         ("serve", Backend::Foundry) => serve_foundry(&argv[1..], &ctx),
+        ("gateway", _) => passerelle(&argv[1..]),
         ("serve", Backend::Npu) => serve_llama(&argv[1..], &ctx),
         (autre, _) => Err(format!(
             "commande « {autre} » inconnue (serve, install, status)"
@@ -150,6 +154,64 @@ fn serve_foundry(argv: &[String], ctx: &Contexte) -> Result<u8, String> {
         .join()
         .map_err(|_| "relais arrêté".to_string())?
         .map(|()| 0)
+}
+
+/// Les identifiants servis : les modèles NPU téléchargés.
+fn servis(exe: &Path, base: &str) -> Result<Vec<String>, String> {
+    Ok(foundry::npu_installes(exe, base)?
+        .into_iter()
+        .map(|m| m.id)
+        .collect())
+}
+
+/// Le fournisseur « NPU (Foundry Local) » du sélecteur de modèles : tous les
+/// modèles NPU téléchargés, aucun chargé d'avance, aucun téléchargé ici.
+fn passerelle(argv: &[String]) -> Result<u8, String> {
+    let port = port(argv)?;
+    let exe = foundry::trouver().map_or_else(foundry::installer, Ok)?;
+    let base = foundry::demarrer(&exe)?;
+    let exe_relance = exe.clone();
+    let exe_change = exe.clone();
+    let relais = proxy::Relais::passerelle(
+        Box::new(move || {
+            let base = foundry::demarrer(&exe_relance)?;
+            Ok(foundry::Amont {
+                base,
+                modele: String::new(),
+            })
+        }),
+        Box::new(move |demande| {
+            let base = foundry::demarrer(&exe_change)?;
+            let modele = foundry::npu_installes(&exe_change, &base)?
+                .into_iter()
+                .find(|m| m.id.eq_ignore_ascii_case(demande))
+                .ok_or_else(|| format!("{demande} n'est pas téléchargé dans Foundry Local"))?;
+            eprintln!("[npu] chargement de {} sur le NPU…", modele.id);
+            let nom = foundry::charger(&exe_change, &base, &modele)?;
+            Ok(foundry::Amont { base, modele: nom })
+        }),
+    );
+    let modeles = servis(&exe, &base)?;
+    eprintln!(
+        "[npu] passerelle Foundry sur 127.0.0.1:{port} : {} modèle(s) NPU téléchargé(s)",
+        modeles.len()
+    );
+    relais.definir_modeles(modeles);
+    relais.definir(foundry::Amont {
+        base: base.clone(),
+        modele: String::new(),
+    });
+    // Un modèle téléchargé ou supprimé depuis les réglages apparaît ou
+    // disparaît de la liste sans relancer la passerelle.
+    let suivi = std::sync::Arc::clone(&relais);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        match servis(&exe, &base) {
+            Ok(m) => suivi.definir_modeles(m),
+            Err(e) => eprintln!("[npu] liste des modèles non relue : {e}"),
+        }
+    });
+    proxy::ecouter(port, relais).map(|()| 0)
 }
 
 /// Ce que veut dire un code de sortie de Windows qui empêche le serveur de

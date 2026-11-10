@@ -76,6 +76,8 @@ fn repondre(methode: &str, params: &Value) -> Result<Value, String> {
                 "npu_activer" => resultat(activer()),
                 "npu_etat" => resultat(etat()),
                 "npu_modeles" => resultat(modeles()),
+                "npu_telecharger" => resultat(telecharger()),
+                "npu_supprimer" => resultat(supprimer()),
                 "npu_foundry_installer" => resultat(installer_foundry()),
                 autre => (format!("outil inconnu : {autre}"), true),
             };
@@ -110,6 +112,16 @@ fn outils() -> Value {
         {
             "name": "npu_modeles",
             "description": "Liste les modèles NPU du catalogue Foundry Local (alias à copier dans le réglage « Modèle Foundry »).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "npu_telecharger",
+            "description": "Télécharge dans Foundry Local le modèle NPU nommé dans le réglage « Modèle Foundry », en arrière-plan.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "npu_supprimer",
+            "description": "Supprime de Foundry Local le modèle nommé dans le réglage « Modèle Foundry ».",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -218,7 +230,7 @@ fn message_foundry(charges: &[String]) -> (bool, String) {
     }
     (
         false,
-        "Foundry Local tourne, mais aucun modèle n'est chargé : lancez le moteur NPU dans Locaryn (Réglages → Moteur).".into(),
+        "Foundry Local tourne, mais aucun modèle n'est chargé : choisissez un modèle du fournisseur « NPU » dans le sélecteur de modèles.".into(),
     )
 }
 
@@ -232,7 +244,7 @@ fn etat_foundry() -> Result<Value, String> {
     let Some(url) = foundry::url_service(&exe) else {
         return Ok(json!({
             "npu_utilise": false,
-            "message": "Foundry Local est installé mais arrêté : lancez le moteur NPU dans Locaryn (Réglages → Moteur)."
+            "message": "Foundry Local est installé mais arrêté : choisissez un modèle du fournisseur « NPU » dans le sélecteur de modèles."
         }));
     };
     let charges = foundry::modeles_charges(&exe, &url)?;
@@ -242,10 +254,21 @@ fn etat_foundry() -> Result<Value, String> {
     )
 }
 
-fn modeles() -> Result<Value, String> {
+/// Foundry installé et démarré, ou un message qui dit quoi faire.
+fn foundry_pret() -> Result<(PathBuf, String), String> {
     let exe = foundry::trouver()
         .ok_or("Foundry Local n'est pas installé : cliquez d'abord « Installer Foundry Local ».")?;
     let url = foundry::demarrer(&exe)?;
+    Ok((exe, url))
+}
+
+fn taille(m: &foundry::ModeleFoundry) -> String {
+    m.taille_mo
+        .map_or_else(String::new, |t| format!(" ({:.1} Go)", t as f64 / 1024.0))
+}
+
+fn modeles() -> Result<Value, String> {
+    let (exe, url) = foundry_pret()?;
     let npu: Vec<foundry::ModeleFoundry> = foundry::catalogue(&exe, &url)?
         .into_iter()
         .filter(foundry::ModeleFoundry::est_npu)
@@ -253,20 +276,82 @@ fn modeles() -> Result<Value, String> {
     if npu.is_empty() {
         return Err("Aucun modèle NPU au catalogue : vérifiez que le pilote du NPU Snapdragon est à jour (Windows Update).".into());
     }
-    let lignes: Vec<String> = npu
+    let presents = foundry::installes(&exe);
+    let (installes, autres): (Vec<_>, Vec<_>) = npu
         .iter()
-        .map(|m| match m.taille_mo {
-            Some(t) => format!("{} ({:.1} Go)", m.alias, t as f64 / 1024.0),
-            None => m.alias.clone(),
-        })
-        .collect();
+        .partition(|m| foundry::est_installe(&presents, m));
+    let liste = |l: &[&foundry::ModeleFoundry]| {
+        l.iter()
+            .map(|m| format!("{}{}", m.alias, taille(m)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let dossier = foundry::emplacement(&exe);
+    let mut message = if installes.is_empty() {
+        "Aucun modèle NPU téléchargé.".to_string()
+    } else {
+        format!(
+            "Téléchargés (dans le sélecteur de modèles, fournisseur « NPU ») : {}.",
+            liste(&installes)
+        )
+    };
+    if !autres.is_empty() {
+        message.push_str(&format!(
+            " À télécharger : {}. Copiez un nom dans « Modèle Foundry », enregistrez, puis « Télécharger le modèle ».",
+            liste(&autres)
+        ));
+    }
+    if let Some(d) = &dossier {
+        message.push_str(&format!(" Dossier des modèles : {d}"));
+    }
+    Ok(json!({ "modeles": npu, "installes": presents, "dossier": dossier, "message": message }))
+}
+
+/// Le modèle nommé dans le réglage, trouvé au catalogue.
+fn modele_du_reglage(exe: &std::path::Path, url: &str) -> Result<foundry::ModeleFoundry, String> {
+    let demande = settings::Settings::load()?.foundry_model;
+    if demande.trim().is_empty() || demande.trim().eq_ignore_ascii_case("auto") {
+        return Err("Écrivez d'abord un nom dans « Modèle Foundry » (voir « Lister les modèles NPU »), puis enregistrez.".into());
+    }
+    let presents = foundry::installes(exe);
+    foundry::choisir(&demande, &foundry::catalogue(exe, url)?, &presents)
+}
+
+fn telecharger() -> Result<Value, String> {
+    let (exe, url) = foundry_pret()?;
+    let m = modele_du_reglage(&exe, &url)?;
+    if foundry::est_installe(&foundry::installes(&exe), &m) {
+        return Ok(json!({ "message": format!("{} est déjà téléchargé.", m.alias) }));
+    }
+    // En arrière-plan : quelques minutes pour un gros modèle, le bouton rend
+    // la main tout de suite.
+    let mut c = Command::new(&exe);
+    c.args(["model", "download", &m.id])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    sans_console(&mut c);
+    c.spawn()
+        .map_err(|e| format!("téléchargement non lancé : {e}"))?;
     Ok(json!({
-        "modeles": npu,
         "message": format!(
-            "Modèles NPU : {}. Copiez un nom dans « Modèle Foundry », enregistrez, puis relancez le moteur.",
-            lignes.join(", ")
+            "Téléchargement de {}{} lancé. Il apparaîtra dans le sélecteur de modèles une fois fini.",
+            m.alias,
+            taille(&m)
         )
     }))
+}
+
+fn supprimer() -> Result<Value, String> {
+    let (exe, url) = foundry_pret()?;
+    let m = modele_du_reglage(&exe, &url)?;
+    if !foundry::est_installe(&foundry::installes(&exe), &m) {
+        return Ok(
+            json!({ "message": format!("{} n'est pas téléchargé : rien à supprimer.", m.alias) }),
+        );
+    }
+    foundry::supprimer(&exe, &m.id)?;
+    Ok(json!({ "message": format!("{} supprimé.", m.alias) }))
 }
 
 fn installer_foundry() -> Result<Value, String> {
@@ -356,6 +441,8 @@ mod tests {
             "npu_activer",
             "npu_etat",
             "npu_modeles",
+            "npu_telecharger",
+            "npu_supprimer",
             "npu_foundry_installer",
         ] {
             assert!(noms.contains(&attendu), "{attendu}");

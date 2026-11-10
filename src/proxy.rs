@@ -20,10 +20,17 @@ const CORPS_MAX: usize = 64 * 1024 * 1024;
 /// redémarrage de Windows Update…). Rend le nouvel amont.
 pub type Relance = Box<dyn Fn() -> Result<Amont, String> + Send + Sync>;
 
+/// Charge sur Foundry le modèle demandé par son nom ; rend le nouvel amont.
+pub type Changement = Box<dyn Fn(&str) -> Result<Amont, String> + Send + Sync>;
+
 /// L'état partagé du relais.
 pub struct Relais {
     amont: Mutex<Option<Amont>>,
     relance: Relance,
+    /// Mode passerelle : les modèles servis (déjà téléchargés), et comment
+    /// passer de l'un à l'autre. Vide : un seul modèle, celui chargé.
+    modeles: Mutex<Vec<String>>,
+    changement: Option<Changement>,
 }
 
 impl Relais {
@@ -31,7 +38,55 @@ impl Relais {
         Arc::new(Self {
             amont: Mutex::new(None),
             relance,
+            modeles: Mutex::new(Vec::new()),
+            changement: None,
         })
+    }
+
+    /// Un relais qui sert plusieurs modèles et charge celui que la requête
+    /// nomme.
+    pub fn passerelle(relance: Relance, changement: Changement) -> Arc<Self> {
+        Arc::new(Self {
+            amont: Mutex::new(None),
+            relance,
+            modeles: Mutex::new(Vec::new()),
+            changement: Some(changement),
+        })
+    }
+
+    pub fn definir_modeles(&self, modeles: Vec<String>) {
+        if let Ok(mut m) = self.modeles.lock() {
+            *m = modeles;
+        }
+    }
+
+    fn modeles(&self) -> Vec<String> {
+        self.modeles.lock().map(|m| m.clone()).unwrap_or_default()
+    }
+
+    /// L'amont qui sert `demande` : le courant, ou celui où Foundry vient de
+    /// charger ce modèle quand il fait partie des modèles servis.
+    fn amont_pour(&self, demande: Option<&str>) -> Result<Option<Amont>, String> {
+        let courant = self.courant();
+        let (Some(changer), Some(d)) = (self.changement.as_ref(), demande) else {
+            return Ok(courant);
+        };
+        if courant
+            .as_ref()
+            .is_some_and(|a| a.modele.eq_ignore_ascii_case(d))
+        {
+            return Ok(courant);
+        }
+        if !self.modeles().iter().any(|m| m.eq_ignore_ascii_case(d)) {
+            return Ok(courant);
+        }
+        let mut garde = self
+            .amont
+            .lock()
+            .map_err(|_| "état du relais corrompu".to_string())?;
+        let nouveau = changer(d)?;
+        *garde = Some(nouveau.clone());
+        Ok(Some(nouveau))
     }
 
     pub fn definir(&self, amont: Amont) {
@@ -117,12 +172,24 @@ pub fn reecrire_modele(corps: &[u8], modele: &str) -> Vec<u8> {
     }
 }
 
-/// La liste `/v1/models` que voit l'hôte : le seul modèle chargé.
-pub fn liste_modeles(modele: &str) -> Value {
+/// La liste `/v1/models` que voit l'hôte.
+pub fn liste_modeles(modeles: &[String]) -> Value {
     json!({
         "object": "list",
-        "data": [{ "id": modele, "object": "model", "owned_by": "foundry-local" }]
+        "data": modeles
+            .iter()
+            .map(|m| json!({ "id": m, "object": "model", "owned_by": "foundry-local" }))
+            .collect::<Vec<_>>()
     })
+}
+
+/// Le champ `model` d'un corps JSON.
+fn modele_demande(corps: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(corps)
+        .ok()?
+        .get("model")?
+        .as_str()
+        .map(str::to_string)
 }
 
 fn raison(code: u16) -> &'static str {
@@ -178,7 +245,14 @@ fn envoyer(amont: &Amont, req: &Requete) -> Result<Option<ureq::Response>, Strin
 }
 
 fn transmettre(relais: &Relais, req: &Requete, s: &mut TcpStream) -> std::io::Result<()> {
-    let Some(amont) = relais.courant() else {
+    let amont = match relais.amont_pour(modele_demande(&req.corps).as_deref()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("[npu] {e}");
+            return repondre_json(s, 502, &json!({"error": {"message": e}}));
+        }
+    };
+    let Some(amont) = amont else {
         return repondre_json(
             s,
             503,
@@ -223,10 +297,14 @@ fn servir_connexion(relais: &Relais, mut s: TcpStream) -> std::io::Result<()> {
             Some(_) => repondre_json(&mut s, 200, &json!({"status": "ok"})),
             None => repondre_json(&mut s, 503, &json!({"status": "loading"})),
         },
-        ("GET", "/v1/models") => match relais.courant() {
-            Some(a) => repondre_json(&mut s, 200, &liste_modeles(&a.modele)),
-            None => repondre_json(&mut s, 503, &json!({"object": "list", "data": []})),
-        },
+        ("GET", "/v1/models") => {
+            let servis = relais.modeles();
+            match relais.courant() {
+                _ if !servis.is_empty() => repondre_json(&mut s, 200, &liste_modeles(&servis)),
+                Some(a) => repondre_json(&mut s, 200, &liste_modeles(&[a.modele])),
+                None => repondre_json(&mut s, 503, &json!({"object": "list", "data": []})),
+            }
+        }
         _ => transmettre(relais, &req, &mut s),
     }
 }

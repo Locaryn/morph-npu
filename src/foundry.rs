@@ -243,6 +243,24 @@ fn sans_version(id: &str) -> &str {
     id.split_once(':').map_or(id, |(nom, _)| nom)
 }
 
+/// `m` est-il dans le cache de Foundry (déjà téléchargé) ?
+pub fn est_installe(installes: &[String], m: &ModeleFoundry) -> bool {
+    let id = sans_version(&m.id).to_ascii_lowercase();
+    installes.iter().any(|i| {
+        let i = sans_version(i).to_ascii_lowercase();
+        i == id || i.contains(&id)
+    })
+}
+
+/// Les identifiants d'une sortie texte de `foundry cache list`.
+pub fn lire_cache_texte(texte: &str) -> Vec<String> {
+    sans_ansi(texte)
+        .split_whitespace()
+        .filter(|m| ressemble_a_un_id(m))
+        .map(str::to_string)
+        .collect()
+}
+
 fn noms(modeles: &[&ModeleFoundry]) -> String {
     let mut a: Vec<&str> = modeles.iter().map(|m| m.alias.as_str()).collect();
     a.dedup();
@@ -251,7 +269,11 @@ fn noms(modeles: &[&ModeleFoundry]) -> String {
 
 /// Le modèle à charger. `demande` vient du réglage : `auto`, un alias du
 /// catalogue, ou l'identifiant exact d'une variante.
-pub fn choisir(demande: &str, catalogue: &[ModeleFoundry]) -> Result<ModeleFoundry, String> {
+pub fn choisir(
+    demande: &str,
+    catalogue: &[ModeleFoundry],
+    installes: &[String],
+) -> Result<ModeleFoundry, String> {
     let npu: Vec<&ModeleFoundry> = catalogue.iter().filter(|m| m.est_npu()).collect();
     if npu.is_empty() {
         return Err(
@@ -262,11 +284,25 @@ pub fn choisir(demande: &str, catalogue: &[ModeleFoundry]) -> Result<ModeleFound
     }
     let d = demande.trim();
     if d.is_empty() || d.eq_ignore_ascii_case("auto") {
+        // « auto » ne télécharge jamais : il prend un modèle NPU déjà présent.
+        let presents: Vec<&ModeleFoundry> = npu
+            .iter()
+            .copied()
+            .filter(|m| est_installe(installes, m))
+            .collect();
+        if presents.is_empty() {
+            return Err(format!(
+                "Aucun modèle NPU téléchargé. Choisissez-en un dans les réglages du morph                  (« Modèle Foundry », puis « Télécharger le modèle ») : {}.",
+                noms(&npu)
+            ));
+        }
         let prefere = PREFERES
             .iter()
-            .find_map(|p| npu.iter().find(|m| m.alias.eq_ignore_ascii_case(p)));
-        let plus_petit = npu.iter().min_by_key(|m| m.taille_mo.unwrap_or(u64::MAX));
-        return Ok((*prefere.or(plus_petit).unwrap_or(&npu[0])).clone());
+            .find_map(|p| presents.iter().find(|m| m.alias.eq_ignore_ascii_case(p)));
+        let plus_petit = presents
+            .iter()
+            .min_by_key(|m| m.taille_mo.unwrap_or(u64::MAX));
+        return Ok((*prefere.or(plus_petit).unwrap_or(&presents[0])).clone());
     }
     if let Some(m) = catalogue
         .iter()
@@ -483,6 +519,79 @@ pub fn modeles_charges(exe: &Path, base: &str) -> Result<Vec<String>, String> {
     }
 }
 
+/// Les modèles déjà téléchargés (le cache de Foundry).
+pub fn installes(exe: &Path) -> Vec<String> {
+    let json = executer(exe, &["cache", "list", "-o", "json"])
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| premier_json(&texte_sortie(&o)))
+        .map(|v| lire_ids_json(&v))
+        .unwrap_or_default();
+    if !json.is_empty() {
+        return json;
+    }
+    executer(exe, &["cache", "list"])
+        .map(|o| lire_cache_texte(&texte_sortie(&o)))
+        .unwrap_or_default()
+}
+
+/// Le dossier où Foundry range ses modèles.
+pub fn emplacement(exe: &Path) -> Option<String> {
+    let o = executer(exe, &["cache", "location"]).ok()?;
+    lire_chemin_windows(&texte_sortie(&o))
+}
+
+/// Le premier chemin Windows (`C:\…`) d'une sortie de CLI.
+pub fn lire_chemin_windows(texte: &str) -> Option<String> {
+    sans_ansi(texte).lines().find_map(|l| {
+        let o = l.as_bytes();
+        (0..o.len().saturating_sub(2))
+            .find(|&i| o[i].is_ascii_alphabetic() && o[i + 1] == b':' && o[i + 2] == b'\\')
+            .map(|i| l[i..].trim().trim_end_matches(['"', '\'']).to_string())
+    })
+}
+
+/// Télécharge un modèle, seulement quand la personne l'a demandé.
+pub fn telecharger(exe: &Path, m: &ModeleFoundry) -> Result<(), String> {
+    eprintln!("[npu] Foundry : téléchargement de {}…", m.id);
+    if executer_visible(exe, &["model", "download", &m.id])? {
+        Ok(())
+    } else {
+        Err(format!("téléchargement de {} refusé par Foundry", m.id))
+    }
+}
+
+/// Retire un modèle du cache de Foundry. La CLI peut demander confirmation :
+/// on lui répond oui.
+pub fn supprimer(exe: &Path, id: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut c = Command::new(exe);
+    c.args(["cache", "remove", id])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    masquer_console(&mut c);
+    let mut enfant = c
+        .spawn()
+        .map_err(|e| format!("impossible de lancer {} : {e}", exe.display()))?;
+    if let Some(mut entree) = enfant.stdin.take() {
+        if let Err(e) = entree.write_all(b"y\n") {
+            eprintln!("[npu] confirmation non envoyée à Foundry : {e}");
+        }
+    }
+    let o = enfant
+        .wait_with_output()
+        .map_err(|e| format!("suppression de {id} : {e}"))?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Foundry refuse de supprimer {id} : {}",
+            texte_sortie(&o).trim()
+        ))
+    }
+}
+
 /// Le nom sous lequel le service a chargé `m` (l'identifiant exact, version
 /// comprise, même quand on a demandé un alias).
 pub fn nom_charge(charges: &[String], m: &ModeleFoundry) -> Option<String> {
@@ -496,15 +605,8 @@ pub fn nom_charge(charges: &[String], m: &ModeleFoundry) -> Option<String> {
     cherche(&m.id).or_else(|| cherche(&m.alias))
 }
 
-/// Télécharge (une fois) puis charge le modèle ; rend son nom chargé.
+/// Charge un modèle déjà téléchargé ; rend son nom chargé.
 pub fn charger(exe: &Path, base: &str, m: &ModeleFoundry) -> Result<String, String> {
-    eprintln!(
-        "[npu] Foundry : téléchargement de {} (une seule fois)…",
-        m.id
-    );
-    if !executer_visible(exe, &["model", "download", &m.id])? {
-        return Err(format!("téléchargement de {} refusé par Foundry", m.id));
-    }
     eprintln!("[npu] Foundry : chargement de {} sur le NPU…", m.id);
     if !executer_visible(exe, &["model", "load", &m.id])? {
         return Err(format!("chargement de {} refusé par Foundry", m.id));
@@ -520,6 +622,15 @@ pub struct Amont {
     pub modele: String,
 }
 
+/// Les modèles NPU déjà téléchargés, tels que le catalogue les décrit.
+pub fn npu_installes(exe: &Path, base: &str) -> Result<Vec<ModeleFoundry>, String> {
+    let presents = installes(exe);
+    Ok(catalogue(exe, base)?
+        .into_iter()
+        .filter(|m| m.est_npu() && est_installe(&presents, m))
+        .collect())
+}
+
 /// Tout le chemin : installer au besoin, démarrer, choisir, charger.
 pub fn preparer(demande: &str) -> Result<Amont, String> {
     let exe = match trouver() {
@@ -528,11 +639,18 @@ pub fn preparer(demande: &str) -> Result<Amont, String> {
     };
     let base = demarrer(&exe)?;
     eprintln!("[npu] Foundry Local en marche sur {base}");
-    let modele = choisir(demande, &catalogue(&exe, &base)?)?;
+    let presents = installes(&exe);
+    let modele = choisir(demande, &catalogue(&exe, &base)?, &presents)?;
     eprintln!(
         "[npu] modèle {} ({}, {})",
         modele.alias, modele.id, modele.appareil
     );
+    if !est_installe(&presents, &modele) {
+        return Err(format!(
+            "{} n'est pas téléchargé : cliquez « Télécharger le modèle » dans les réglages du morph.",
+            modele.alias
+        ));
+    }
     let nom = charger(&exe, &base, &modele)?;
     Ok(Amont { base, modele: nom })
 }
@@ -540,6 +658,34 @@ pub fn preparer(demande: &str) -> Result<Amont, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tout(l: &[ModeleFoundry]) -> Vec<String> {
+        l.iter().map(|m| m.id.clone()).collect()
+    }
+
+    #[test]
+    fn auto_ne_telecharge_rien_et_prend_un_modele_present() {
+        let l = lire_liste_cli(LISTE_0X);
+        let e = choisir("auto", &l, &[]).unwrap_err();
+        assert!(e.contains("Aucun modèle NPU téléchargé"), "{e}");
+        let present = vec!["Phi-4-mini-instruct-qnn-npu:2".to_string()];
+        assert_eq!(choisir("auto", &l, &present).unwrap().alias, "phi-4-mini");
+    }
+
+    #[test]
+    fn le_cache_et_son_dossier_se_lisent() {
+        let ids = lire_cache_texte(
+            "Models cached on device:\n  Alias  Model ID\n💾 phi-4-mini  Phi-4-mini-instruct-qnn-npu:2\n",
+        );
+        assert_eq!(ids, vec!["Phi-4-mini-instruct-qnn-npu:2"]);
+        assert_eq!(
+            lire_chemin_windows(
+                r"💾 Cache directory path: C:\Users\a\.foundry\cache\models
+"
+            ),
+            Some(r"C:\Users\a\.foundry\cache\models".into())
+        );
+    }
 
     const LISTE_0X: &str = "\
 Alias                          Device     Task               File Size    License      Model ID
@@ -625,7 +771,7 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
         assert!(l[0].est_npu());
         assert!(!l[1].est_npu());
         assert_eq!(
-            choisir("auto", &l).unwrap().id,
+            choisir("auto", &l, &tout(&l)).unwrap().id,
             "qwen2.5-1.5b-instruct-qnn-npu:3"
         );
     }
@@ -665,7 +811,7 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
     #[test]
     fn auto_prend_un_petit_modele_npu() {
         let l = lire_liste_cli(LISTE_0X);
-        let m = choisir("auto", &l).unwrap();
+        let m = choisir("auto", &l, &tout(&l)).unwrap();
         assert_eq!(m.id, "qwen2.5-1.5b-instruct-qnn-npu");
     }
 
@@ -673,11 +819,13 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
     fn un_alias_donne_sa_variante_npu() {
         let l = lire_liste_cli(LISTE_0X);
         assert_eq!(
-            choisir("Phi-4-Mini", &l).unwrap().id,
+            choisir("Phi-4-Mini", &l, &[]).unwrap().id,
             "Phi-4-mini-instruct-qnn-npu"
         );
         assert_eq!(
-            choisir("phi-4-mini-instruct-qnn-npu:3", &l).unwrap().id,
+            choisir("phi-4-mini-instruct-qnn-npu:3", &l, &[])
+                .unwrap()
+                .id,
             "Phi-4-mini-instruct-qnn-npu"
         );
     }
@@ -685,7 +833,7 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
     #[test]
     fn un_gguf_ou_un_modele_sans_npu_est_refuse_clairement() {
         let l = lire_liste_cli(LISTE_0X);
-        let e = choisir("Qwen3-4B-Q4_K_M.gguf", &l).unwrap_err();
+        let e = choisir("Qwen3-4B-Q4_K_M.gguf", &l, &[]).unwrap_err();
         assert!(e.contains("GGUF"), "{e}");
         assert!(e.contains("phi-4-mini"), "{e}");
         let cpu_seul = vec![ModeleFoundry {
@@ -694,7 +842,9 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
             appareil: "CPU".into(),
             taille_mo: None,
         }];
-        assert!(choisir("auto", &cpu_seul).unwrap_err().contains("pilote"));
+        assert!(choisir("auto", &cpu_seul, &[])
+            .unwrap_err()
+            .contains("pilote"));
     }
 
     #[test]
