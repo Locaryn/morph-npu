@@ -164,10 +164,10 @@ fn serve_foundry(argv: &[String], ctx: &Contexte) -> Result<u8, String> {
 }
 
 /// Les identifiants servis : tous les modèles NPU du catalogue.
-fn servis(exe: &Path, base: &str) -> Result<Vec<String>, String> {
+fn servis(exe: &Path, base: &str) -> Result<Vec<(String, String)>, String> {
     Ok(foundry::npu_du_catalogue(exe, base)?
         .into_iter()
-        .map(|m| m.id)
+        .map(|m| (m.id, m.alias))
         .collect())
 }
 
@@ -245,7 +245,8 @@ fn passerelle(argv: &[String]) -> Result<u8, String> {
         "[npu] passerelle Foundry sur 127.0.0.1:{port} : {} modèle(s) NPU au catalogue",
         modeles.len()
     );
-    relais.definir_modeles(modeles);
+    relais.definir_noms(modeles.iter().cloned().collect());
+    relais.definir_modeles(modeles.into_iter().map(|(id, _)| id).collect());
     relais.definir(foundry::Amont {
         base,
         modele: String::new(),

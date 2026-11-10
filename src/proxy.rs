@@ -30,6 +30,8 @@ pub struct Relais {
     /// Mode passerelle : les modèles servis (déjà téléchargés), et comment
     /// passer de l'un à l'autre. Vide : un seul modèle, celui chargé.
     modeles: Mutex<Vec<String>>,
+    /// Nom court de chaque modèle servi (`phi-4-mini`), par identifiant.
+    noms: Mutex<std::collections::HashMap<String, String>>,
     changement: Option<Changement>,
 }
 
@@ -39,6 +41,7 @@ impl Relais {
             amont: Mutex::new(None),
             relance,
             modeles: Mutex::new(Vec::new()),
+            noms: Mutex::new(std::collections::HashMap::new()),
             changement: None,
         })
     }
@@ -50,6 +53,7 @@ impl Relais {
             amont: Mutex::new(None),
             relance,
             modeles: Mutex::new(Vec::new()),
+            noms: Mutex::new(std::collections::HashMap::new()),
             changement: Some(changement),
         })
     }
@@ -58,6 +62,16 @@ impl Relais {
         if let Ok(mut m) = self.modeles.lock() {
             *m = modeles;
         }
+    }
+
+    pub fn definir_noms(&self, noms: std::collections::HashMap<String, String>) {
+        if let Ok(mut n) = self.noms.lock() {
+            *n = noms;
+        }
+    }
+
+    fn noms(&self) -> std::collections::HashMap<String, String> {
+        self.noms.lock().map(|n| n.clone()).unwrap_or_default()
     }
 
     fn modeles(&self) -> Vec<String> {
@@ -173,12 +187,18 @@ pub fn reecrire_modele(corps: &[u8], modele: &str) -> Vec<u8> {
 }
 
 /// La liste `/v1/models` que voit l'hôte.
-pub fn liste_modeles(modeles: &[String]) -> Value {
+pub fn liste_modeles(
+    modeles: &[String],
+    noms: &std::collections::HashMap<String, String>,
+) -> Value {
     json!({
         "object": "list",
         "data": modeles
             .iter()
-            .map(|m| json!({ "id": m, "object": "model", "owned_by": "foundry-local" }))
+            .map(|m| {
+                let nom = noms.get(m).map_or(m.as_str(), String::as_str);
+                json!({ "id": m, "name": nom, "object": "model", "owned_by": "foundry-local" })
+            })
             .collect::<Vec<_>>()
     })
 }
@@ -300,8 +320,10 @@ fn servir_connexion(relais: &Relais, mut s: TcpStream) -> std::io::Result<()> {
         ("GET", "/v1/models") => {
             let servis = relais.modeles();
             match relais.courant() {
-                _ if !servis.is_empty() => repondre_json(&mut s, 200, &liste_modeles(&servis)),
-                Some(a) => repondre_json(&mut s, 200, &liste_modeles(&[a.modele])),
+                _ if !servis.is_empty() => {
+                    repondre_json(&mut s, 200, &liste_modeles(&servis, &relais.noms()))
+                }
+                Some(a) => repondre_json(&mut s, 200, &liste_modeles(&[a.modele], &relais.noms())),
                 None => repondre_json(&mut s, 503, &json!({"object": "list", "data": []})),
             }
         }
