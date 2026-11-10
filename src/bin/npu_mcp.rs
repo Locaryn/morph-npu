@@ -230,7 +230,7 @@ fn message_foundry(charges: &[String]) -> (bool, String) {
     }
     (
         false,
-        "Foundry Local tourne, mais aucun modèle n'est chargé : choisissez un modèle du fournisseur « NPU » dans le sélecteur de modèles.".into(),
+        "Foundry Local tourne, mais aucun modèle n'est chargé : choisissez un modèle NPU dans la liste des modèles.".into(),
     )
 }
 
@@ -244,7 +244,7 @@ fn etat_foundry() -> Result<Value, String> {
     let Some(url) = foundry::url_service(&exe) else {
         return Ok(json!({
             "npu_utilise": false,
-            "message": "Foundry Local est installé mais arrêté : choisissez un modèle du fournisseur « NPU » dans le sélecteur de modèles."
+            "message": "Foundry Local est installé mais arrêté : choisissez un modèle NPU dans la liste des modèles."
         }));
     };
     let charges = foundry::modeles_charges(&exe, &url)?;
@@ -258,6 +258,9 @@ fn etat_foundry() -> Result<Value, String> {
 fn foundry_pret() -> Result<(PathBuf, String), String> {
     let exe = foundry::trouver()
         .ok_or("Foundry Local n'est pas installé : cliquez d'abord « Installer Foundry Local ».")?;
+    if let Some(dossier) = foundry::modeles_locaryn() {
+        foundry::ranger_dans(&exe, &dossier);
+    }
     let url = foundry::demarrer(&exe)?;
     Ok((exe, url))
 }
@@ -290,10 +293,7 @@ fn modeles() -> Result<Value, String> {
     let mut message = if installes.is_empty() {
         "Aucun modèle NPU téléchargé.".to_string()
     } else {
-        format!(
-            "Téléchargés (dans le sélecteur de modèles, fournisseur « NPU ») : {}.",
-            liste(&installes)
-        )
+        format!("Téléchargés : {}.", liste(&installes))
     };
     if !autres.is_empty() {
         message.push_str(&format!(
@@ -335,7 +335,7 @@ fn telecharger() -> Result<Value, String> {
         .map_err(|e| format!("téléchargement non lancé : {e}"))?;
     Ok(json!({
         "message": format!(
-            "Téléchargement de {}{} lancé. Il apparaîtra dans le sélecteur de modèles une fois fini.",
+            "Téléchargement de {}{} lancé. Il sera prêt à charger une fois fini.",
             m.alias,
             taille(&m)
         )

@@ -37,7 +37,10 @@ pub struct ModeleFoundry {
 
 impl ModeleFoundry {
     pub fn est_npu(&self) -> bool {
-        self.appareil.eq_ignore_ascii_case("npu")
+        // `LOCARYN_NPU_APPAREIL_ESSAI=cpu` : essayer toute la chaîne sur un PC
+        // sans NPU.
+        let voulu = std::env::var("LOCARYN_NPU_APPAREIL_ESSAI").unwrap_or_else(|_| "npu".into());
+        self.appareil.eq_ignore_ascii_case(voulu.trim())
     }
 }
 
@@ -561,35 +564,69 @@ pub fn telecharger(exe: &Path, m: &ModeleFoundry) -> Result<(), String> {
     }
 }
 
-/// Retire un modèle du cache de Foundry. La CLI peut demander confirmation :
-/// on lui répond oui.
+/// Retire un modèle du cache de Foundry, sans question.
 pub fn supprimer(exe: &Path, id: &str) -> Result<(), String> {
-    use std::io::Write;
-    let mut c = Command::new(exe);
-    c.args(["cache", "remove", id])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    masquer_console(&mut c);
-    let mut enfant = c
-        .spawn()
-        .map_err(|e| format!("impossible de lancer {} : {e}", exe.display()))?;
-    if let Some(mut entree) = enfant.stdin.take() {
-        if let Err(e) = entree.write_all(b"y\n") {
-            eprintln!("[npu] confirmation non envoyée à Foundry : {e}");
-        }
-    }
-    let o = enfant
-        .wait_with_output()
-        .map_err(|e| format!("suppression de {id} : {e}"))?;
+    let o = executer(exe, &["cache", "remove", id, "--force"])?;
     if o.status.success() {
         Ok(())
     } else {
         Err(format!(
             "Foundry refuse de supprimer {id} : {}",
-            texte_sortie(&o).trim()
+            sans_ansi(&texte_sortie(&o)).trim()
         ))
     }
+}
+
+/// Range les modèles de Foundry dans la bibliothèque de modèles de Locaryn
+/// (`<modèles>/foundry`) plutôt que dans un dossier à part. Ne déplace rien :
+/// si des modèles sont déjà téléchargés ailleurs, le dossier reste où il est.
+pub fn ranger_dans(exe: &Path, modeles_locaryn: &Path) {
+    let cible = modeles_locaryn.join("foundry");
+    let actuel = emplacement(exe);
+    if actuel
+        .as_deref()
+        .is_some_and(|a| Path::new(a) == cible.as_path())
+    {
+        return;
+    }
+    if !installes(exe).is_empty() {
+        eprintln!(
+            "[npu] des modèles sont déjà dans {} : dossier conservé",
+            actuel.unwrap_or_default()
+        );
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&cible) {
+        eprintln!("[npu] dossier {} non créé : {e}", cible.display());
+        return;
+    }
+    match executer(exe, &["cache", "cd", &cible.display().to_string()]) {
+        Ok(o) if o.status.success() => {
+            eprintln!("[npu] modèles Foundry rangés dans {}", cible.display());
+        }
+        Ok(o) => eprintln!(
+            "[npu] dossier des modèles inchangé : {}",
+            sans_ansi(&texte_sortie(&o)).trim()
+        ),
+        Err(e) => eprintln!("[npu] dossier des modèles inchangé : {e}"),
+    }
+}
+
+/// La bibliothèque de modèles de Locaryn, telle que l'hôte la donne.
+pub fn modeles_locaryn() -> Option<PathBuf> {
+    std::env::var("LOCARYN_MODELS_DIR")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && !v.contains("{{"))
+        .map(PathBuf::from)
+}
+
+/// Les modèles NPU du catalogue, téléchargés ou non.
+pub fn npu_du_catalogue(exe: &Path, base: &str) -> Result<Vec<ModeleFoundry>, String> {
+    Ok(catalogue(exe, base)?
+        .into_iter()
+        .filter(ModeleFoundry::est_npu)
+        .collect())
 }
 
 /// Le nom sous lequel le service a chargé `m` (l'identifiant exact, version
@@ -620,15 +657,6 @@ pub fn charger(exe: &Path, base: &str, m: &ModeleFoundry) -> Result<String, Stri
 pub struct Amont {
     pub base: String,
     pub modele: String,
-}
-
-/// Les modèles NPU déjà téléchargés, tels que le catalogue les décrit.
-pub fn npu_installes(exe: &Path, base: &str) -> Result<Vec<ModeleFoundry>, String> {
-    let presents = installes(exe);
-    Ok(catalogue(exe, base)?
-        .into_iter()
-        .filter(|m| m.est_npu() && est_installe(&presents, m))
-        .collect())
 }
 
 /// Tout le chemin : installer au besoin, démarrer, choisir, charger.

@@ -39,6 +39,14 @@ fn run() -> Result<u8, String> {
     let commande = argv.first().map(String::as_str).unwrap_or("");
     let reglages = settings::Settings::load()?;
     let (os, arch) = (std::env::consts::OS, backend::host_arch());
+    // La passerelle ne dépend pas du réglage « Moteur ». Hors Snapdragon elle
+    // ne sert qu'aux essais (`LOCARYN_NPU_APPAREIL_ESSAI`).
+    if commande == "gateway" {
+        if std::env::var_os("LOCARYN_NPU_APPAREIL_ESSAI").is_none() {
+            backend::choose("foundry", os, arch)?;
+        }
+        return passerelle(&argv[1..]);
+    }
     let ctx = Contexte {
         choix: backend::choose(&reglages.backend, os, arch)?,
         tag: reglages.tag().to_string(),
@@ -61,7 +69,6 @@ fn run() -> Result<u8, String> {
             Ok(0)
         }
         ("serve", Backend::Foundry) => serve_foundry(&argv[1..], &ctx),
-        ("gateway", _) => passerelle(&argv[1..]),
         ("serve", Backend::Npu) => serve_llama(&argv[1..], &ctx),
         (autre, _) => Err(format!(
             "commande « {autre} » inconnue (serve, install, status)"
@@ -156,19 +163,70 @@ fn serve_foundry(argv: &[String], ctx: &Contexte) -> Result<u8, String> {
         .map(|()| 0)
 }
 
-/// Les identifiants servis : les modèles NPU téléchargés.
+/// Les identifiants servis : tous les modèles NPU du catalogue.
 fn servis(exe: &Path, base: &str) -> Result<Vec<String>, String> {
-    Ok(foundry::npu_installes(exe, base)?
+    Ok(foundry::npu_du_catalogue(exe, base)?
         .into_iter()
         .map(|m| m.id)
         .collect())
 }
 
-/// Le fournisseur « NPU (Foundry Local) » du sélecteur de modèles : tous les
-/// modèles NPU téléchargés, aucun chargé d'avance, aucun téléchargé ici.
+/// Téléchargements en cours, pour n'en lancer qu'un par modèle.
+static TELECHARGEMENTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Charge le modèle demandé. S'il n'est pas encore téléchargé, le
+/// téléchargement part en arrière-plan et la conversation reçoit un message
+/// clair : une requête ne peut pas attendre plusieurs minutes.
+fn charger_ou_telecharger(exe: &Path, demande: &str) -> Result<foundry::Amont, String> {
+    let base = foundry::demarrer(exe)?;
+    let modele = foundry::npu_du_catalogue(exe, &base)?
+        .into_iter()
+        .find(|m| m.id.eq_ignore_ascii_case(demande))
+        .ok_or_else(|| format!("{demande} n'est pas un modèle NPU de Foundry Local"))?;
+    if foundry::est_installe(&foundry::installes(exe), &modele) {
+        eprintln!("[npu] chargement de {} sur le NPU…", modele.id);
+        let nom = foundry::charger(exe, &base, &modele)?;
+        return Ok(foundry::Amont { base, modele: nom });
+    }
+    let taille = modele
+        .taille_mo
+        .map_or_else(String::new, |t| format!(" ({:.1} Go)", t as f64 / 1024.0));
+    let deja = {
+        let mut en_cours = TELECHARGEMENTS
+            .lock()
+            .map_err(|_| "suivi des téléchargements corrompu".to_string())?;
+        let deja = en_cours.contains(&modele.id);
+        if !deja {
+            en_cours.push(modele.id.clone());
+        }
+        deja
+    };
+    if !deja {
+        let (exe, m) = (exe.to_path_buf(), modele.clone());
+        std::thread::spawn(move || {
+            if let Err(e) = foundry::telecharger(&exe, &m) {
+                eprintln!("[npu] {e}");
+            }
+            if let Ok(mut en_cours) = TELECHARGEMENTS.lock() {
+                en_cours.retain(|i| i != &m.id);
+            }
+        });
+    }
+    Err(format!(
+        "{} n'était pas encore sur ce PC : son téléchargement{taille} est en cours.          Renvoyez votre message dans quelques minutes.",
+        modele.alias
+    ))
+}
+
+/// Le fournisseur « NPU » du sélecteur de modèles : tous les modèles NPU du
+/// catalogue Foundry. Rien n'est téléchargé ni chargé avant qu'on en
+/// choisisse un.
 fn passerelle(argv: &[String]) -> Result<u8, String> {
     let port = port(argv)?;
     let exe = foundry::trouver().map_or_else(foundry::installer, Ok)?;
+    if let Some(dossier) = foundry::modeles_locaryn() {
+        foundry::ranger_dans(&exe, &dossier);
+    }
     let base = foundry::demarrer(&exe)?;
     let exe_relance = exe.clone();
     let exe_change = exe.clone();
@@ -180,36 +238,17 @@ fn passerelle(argv: &[String]) -> Result<u8, String> {
                 modele: String::new(),
             })
         }),
-        Box::new(move |demande| {
-            let base = foundry::demarrer(&exe_change)?;
-            let modele = foundry::npu_installes(&exe_change, &base)?
-                .into_iter()
-                .find(|m| m.id.eq_ignore_ascii_case(demande))
-                .ok_or_else(|| format!("{demande} n'est pas téléchargé dans Foundry Local"))?;
-            eprintln!("[npu] chargement de {} sur le NPU…", modele.id);
-            let nom = foundry::charger(&exe_change, &base, &modele)?;
-            Ok(foundry::Amont { base, modele: nom })
-        }),
+        Box::new(move |demande| charger_ou_telecharger(&exe_change, demande)),
     );
     let modeles = servis(&exe, &base)?;
     eprintln!(
-        "[npu] passerelle Foundry sur 127.0.0.1:{port} : {} modèle(s) NPU téléchargé(s)",
+        "[npu] passerelle Foundry sur 127.0.0.1:{port} : {} modèle(s) NPU au catalogue",
         modeles.len()
     );
     relais.definir_modeles(modeles);
     relais.definir(foundry::Amont {
-        base: base.clone(),
+        base,
         modele: String::new(),
-    });
-    // Un modèle téléchargé ou supprimé depuis les réglages apparaît ou
-    // disparaît de la liste sans relancer la passerelle.
-    let suivi = std::sync::Arc::clone(&relais);
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_secs(30));
-        match servis(&exe, &base) {
-            Ok(m) => suivi.definir_modeles(m),
-            Err(e) => eprintln!("[npu] liste des modèles non relue : {e}"),
-        }
     });
     proxy::ecouter(port, relais).map(|()| 0)
 }

@@ -2,8 +2,8 @@
   "$schema": "https://locaryn.dev/schema/morph.json/v0.1",
   "apiVersion": "0.1",
   "name": "morph-npu",
-  "version": "0.1.0-beta.4",
-  "description": "Moteur NPU pour Snapdragon (Windows ARM64). Les modèles NPU téléchargés dans Microsoft Foundry Local apparaissent dans le sélecteur de modèles (fournisseur « NPU ») et se chargent quand on les choisit : NPU par le pilote signé de Qualcomm, sans mode test ni Secure Boot à couper. Rien n'est téléchargé sans votre demande. En option, llama.cpp Hexagon pour les fichiers GGUF (exige le mode test-signing).",
+  "version": "0.1.0-beta.5",
+  "description": "NPU Snapdragon (Windows ARM64). Une fois le morph installé, les modèles compatibles NPU apparaissent dans la liste des modèles : choisissez-en un, il se télécharge puis tourne sur le NPU (Microsoft Foundry Local, pilote signé de Qualcomm, sans mode test ni Secure Boot à couper). Les modèles sont rangés dans le dossier de modèles de Locaryn. En option, llama.cpp Hexagon pour les fichiers GGUF (exige le mode test-signing).",
   "author": "Locaryn Team",
   "license": "Apache-2.0",
   "homepage": "https://github.com/Locaryn/morph-npu",
@@ -59,7 +59,7 @@
             "label": "Modèle Foundry",
             "kind": "string",
             "default": "auto",
-            "hint": "Nom d'un modèle NPU (voir « Lister les modèles NPU »), pour le télécharger ou le supprimer avec les boutons ci-dessous. Les modèles téléchargés apparaissent d'eux-mêmes dans le sélecteur de modèles, fournisseur « NPU » : rien d'autre à activer. « auto » ne télécharge jamais rien."
+            "hint": "Facultatif. Les modèles NPU se choisissent dans la liste des modèles : rien à régler ici. Ce champ ne sert qu'aux boutons ci-dessous (télécharger d'avance ou supprimer un modèle, par son nom)."
           },
           {
             "key": "telecharger",
@@ -80,14 +80,14 @@
             "label": "Installer Foundry Local",
             "kind": "action",
             "tool": "npu_foundry_installer",
-            "hint": "Normalement inutile : le moteur l'installe seul au premier lancement. À utiliser si cette installation a échoué ; Windows peut demander l'autorisation."
+            "hint": "Normalement inutile : Foundry Local s'installe seul à l'activation du morph. À utiliser si cette installation a échoué."
           },
           {
             "key": "modeles",
             "label": "Lister les modèles NPU",
             "kind": "action",
             "tool": "npu_modeles",
-            "hint": "Les modèles NPU de ce PC : ceux déjà téléchargés, ceux à télécharger, et le dossier où Foundry les range."
+            "hint": "Les modèles NPU de ce PC : téléchargés, disponibles, et le dossier où ils sont rangés."
           },
           {
             "key": "etat",
@@ -126,7 +126,7 @@
   ],
   "cloud_provider": {
     "id": "npu",
-    "label": "NPU (Foundry Local)",
+    "label": "NPU",
     "api_url": "http://127.0.0.1:8190",
     "models_url": "http://127.0.0.1:8190/v1/models",
     "docs_url": "https://learn.microsoft.com/azure/ai-foundry/foundry-local/",
@@ -139,10 +139,14 @@
         "--port",
         "8190"
       ],
+      "env": {
+        "LOCARYN_MODELS_DIR": "{{models_dir}}"
+      },
       "health_url": "http://127.0.0.1:8190/health",
       "start_timeout_seconds": 600,
       "install_hint": "Windows 11 ARM64 (Snapdragon X). Foundry Local s'installe seul au premier démarrage."
-    }
+    },
+    "inline_models": true
   },
   "engine": {
     "id": "npu",
@@ -192,6 +196,14 @@
   "beta": true,
   "stability": "untested",
   "versions": [
+    {
+      "version": "0.1.0-beta.5",
+      "is_beta": true,
+      "summary": "Tous les modèles compatibles NPU apparaissent directement dans la liste des modèles, sans dossier ni moteur à activer ; un modèle choisi se télécharge puis se charge ; modèles rangés dans le dossier de modèles de Locaryn",
+      "tag": "v0.1.0-beta.5",
+      "released_at": "2026-11-10",
+      "install_source": "Locaryn/morph-npu#v0.1.0-beta.5"
+    },
     {
       "version": "0.1.0-beta.4",
       "is_beta": true,
