@@ -10,6 +10,7 @@
 
 pub mod args;
 pub mod backend;
+pub mod diagnostic;
 pub mod foundry;
 pub mod proc;
 pub mod proxy;

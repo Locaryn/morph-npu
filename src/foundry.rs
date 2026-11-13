@@ -21,7 +21,7 @@ pub const PAQUET_WINGET: &str = "Microsoft.FoundryLocal";
 pub const PREFERES: [&str; 4] = ["qwen2.5-1.5b", "phi-4-mini", "phi-3.5-mini", "qwen2.5-7b"];
 
 /// Une entrée du catalogue Foundry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct ModeleFoundry {
     /// Nom court (`phi-4-mini`), commun aux variantes CPU, GPU et NPU.
     pub alias: String,
@@ -33,9 +33,67 @@ pub struct ModeleFoundry {
     pub appareil: String,
     /// Taille du téléchargement, en Mo, quand elle est connue.
     pub taille_mo: Option<u64>,
+    /// Le fournisseur d'exécution d'ONNX Runtime (`QNNExecutionProvider`,
+    /// `CPUExecutionProvider`…), quand le catalogue le donne.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fournisseur: Option<String>,
+    /// Le nom long de la variante (`DeepSeek-R1-Distill-Qwen-7B-qnn-npu`),
+    /// celui que les autres catalogues reconnaissent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variante: Option<String>,
+}
+
+/// Les mots qui, dans un nom de variante, désignent l'appareil ou le moteur
+/// et non le modèle : tout ce qui suit le premier d'entre eux est retiré.
+const MOTS_D_APPAREIL: [&str; 12] = [
+    "qnn", "npu", "gpu", "cpu", "cuda", "trtrtx", "generic", "webgpu", "dml", "openvino", "vitis",
+    "vitisai",
+];
+
+/// `DeepSeek-R1-Distill-Qwen-7B-qnn-npu:1` → `DeepSeek-R1-Distill-Qwen-7B`.
+pub fn sans_appareil(nom: &str) -> String {
+    let nom = sans_version(nom);
+    let morceaux: Vec<&str> = nom.split('-').collect();
+    let fin = morceaux
+        .iter()
+        .position(|m| MOTS_D_APPAREIL.contains(&m.to_ascii_lowercase().as_str()))
+        .unwrap_or(morceaux.len());
+    morceaux[..fin].join("-")
+}
+
+/// L'appareil d'une entrée : celui que le catalogue déclare, sinon celui que
+/// porte son nom (`…-qnn-npu` → `NPU`).
+pub fn appareil_de(m: &ModeleFoundry) -> String {
+    if !m.appareil.is_empty() {
+        return m.appareil.clone();
+    }
+    let id = m.id.to_ascii_lowercase();
+    ["npu", "gpu", "cpu"]
+        .iter()
+        .find(|a| id.contains(*a))
+        .map_or_else(String::new, |a| a.to_ascii_uppercase())
 }
 
 impl ModeleFoundry {
+    /// Tous les noms sous lesquels ce modèle est connu ailleurs : l'alias
+    /// Foundry, le nom long de la variante sans son appareil, l'identifiant
+    /// sans version ni appareil. Sans eux, `deepseek-r1-7b` ne reconnaissait
+    /// pas « DeepSeek-R1-Distill-Qwen-7B ».
+    pub fn noms_connus(&self) -> Vec<String> {
+        let mut noms: Vec<String> = Vec::new();
+        let candidats = [
+            Some(self.alias.clone()),
+            self.variante.as_deref().map(sans_appareil),
+            Some(sans_appareil(&self.id)),
+        ];
+        for n in candidats.into_iter().flatten() {
+            if !n.is_empty() && !noms.iter().any(|d| d.eq_ignore_ascii_case(&n)) {
+                noms.push(n);
+            }
+        }
+        noms
+    }
+
     pub fn est_npu(&self) -> bool {
         // `LOCARYN_NPU_APPAREIL_ESSAI=cpu` : essayer toute la chaîne sur un PC
         // sans NPU.
@@ -147,6 +205,7 @@ fn lire_ligne(ligne: &str, alias_courant: &str) -> Option<ModeleFoundry> {
         id,
         appareil: mots[pos].to_ascii_uppercase(),
         taille_mo,
+        ..Default::default()
     })
 }
 
@@ -210,11 +269,18 @@ fn lire_entree(m: &Value) -> Option<ModeleFoundry> {
     let appareil = Some(texte_de(m, &["device"]))
         .filter(|a| !a.is_empty())
         .unwrap_or_else(|| texte_de(&m["runtime"], &["deviceType"]));
+    let fournisseur = Some(texte_de(m, &["executionProvider"]))
+        .filter(|f| !f.is_empty())
+        .or_else(|| Some(texte_de(&m["runtime"], &["executionProvider"])))
+        .filter(|f| !f.is_empty());
+    let variante = Some(texte_de(m, &["variantName", "displayName"])).filter(|v| !v.is_empty());
     Some(ModeleFoundry {
         alias,
         id,
         appareil: appareil.to_ascii_uppercase(),
         taille_mo: m.get("fileSizeMb").and_then(Value::as_u64),
+        fournisseur,
+        variante,
     })
 }
 
@@ -510,16 +576,68 @@ pub fn catalogue(exe: &Path, base: &str) -> Result<Vec<ModeleFoundry>, String> {
 
 /// Les modèles chargés par le service : la CLI (0.11+), sinon l'API (0.x).
 pub fn modeles_charges(exe: &Path, base: &str) -> Result<Vec<String>, String> {
+    Ok(charges_details(exe, base)?
+        .into_iter()
+        .map(|m| m.id)
+        .collect())
+}
+
+/// Les modèles chargés, avec l'appareil et le fournisseur d'exécution que
+/// Foundry déclare pour chacun.
+pub fn charges_details(exe: &Path, base: &str) -> Result<Vec<ModeleFoundry>, String> {
     let cli = executer(exe, &["model", "list", "--loaded", "-o", "json"])
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| premier_json(&texte_sortie(&o)));
-    match cli {
-        Some(v) => Ok(lire_ids_json(&v)),
-        None => Ok(lire_ids_json(&obtenir_json(&format!(
-            "{base}/openai/loadedmodels"
-        ))?)),
+    let v = match cli {
+        Some(v) => v,
+        None => obtenir_json(&format!("{base}/openai/loadedmodels"))?,
+    };
+    Ok(lire_charges_json(&v))
+}
+
+/// Une liste JSON de modèles chargés : des entrées complètes (0.11) ou de
+/// simples identifiants (0.x), dont l'appareil se lit alors dans le nom.
+pub fn lire_charges_json(v: &Value) -> Vec<ModeleFoundry> {
+    entrees(v)
+        .iter()
+        .filter_map(|m| match m {
+            Value::String(s) => Some(ModeleFoundry {
+                id: s.clone(),
+                alias: sans_appareil(s),
+                ..Default::default()
+            }),
+            autre => lire_entree(autre),
+        })
+        .map(|mut m| {
+            m.appareil = appareil_de(&m);
+            m
+        })
+        .collect()
+}
+
+/// Ce que contient le catalogue, en une phrase : combien de variantes NPU,
+/// et, quand il n'y en a aucune, la cause probable.
+pub fn bilan_catalogue(catalogue: &[ModeleFoundry]) -> String {
+    let npu = catalogue.iter().filter(|m| m.appareil == "NPU").count();
+    let total = catalogue.len();
+    if npu > 0 {
+        let mut alias: Vec<&str> = catalogue
+            .iter()
+            .filter(|m| m.appareil == "NPU")
+            .map(|m| m.alias.as_str())
+            .collect();
+        alias.dedup();
+        return format!(
+            "{npu} variante(s) NPU sur {total} au catalogue Foundry de ce PC : {}.",
+            alias.join(", ")
+        );
     }
+    format!(
+        "Aucune variante NPU sur {total} au catalogue Foundry de ce PC. Foundry ne propose de \
+         modèles NPU que s'il voit un NPU qu'il sait piloter (Snapdragon X avec un pilote \
+         récent) : sur ce PC, aucun modèle ne tournera sur le NPU."
+    )
 }
 
 /// Les modèles déjà téléchargés (le cache de Foundry).
@@ -869,6 +987,7 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
             id: "Phi-4-generic-cpu".into(),
             appareil: "CPU".into(),
             taille_mo: None,
+            ..Default::default()
         }];
         assert!(choisir("auto", &cpu_seul, &[])
             .unwrap_err()
@@ -882,6 +1001,7 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
             id: "phi-4-mini".into(),
             appareil: "NPU".into(),
             taille_mo: None,
+            ..Default::default()
         };
         let charges = vec!["Phi-4-mini-instruct-qnn-npu:2".to_string()];
         assert_eq!(
@@ -889,6 +1009,68 @@ whisper-tiny                   NPU        automatic-speech-recognition 0.18 GB M
             Some("Phi-4-mini-instruct-qnn-npu:2".into())
         );
         assert_eq!(nom_charge(&[], &m), None);
+    }
+
+    #[test]
+    fn un_modele_est_reconnu_sous_son_nom_long() {
+        assert_eq!(
+            sans_appareil("DeepSeek-R1-Distill-Qwen-7B-qnn-npu:1"),
+            "DeepSeek-R1-Distill-Qwen-7B"
+        );
+        assert_eq!(
+            sans_appareil("qwen2.5-0.5b-instruct-generic-cpu:4"),
+            "qwen2.5-0.5b-instruct"
+        );
+        let v = premier_json(
+            r#"{"variants":[{"alias":"deepseek-r1-7b","variantName":"DeepSeek-R1-Distill-Qwen-7B-qnn-npu",
+            "variantId":"deepseek-r1-distill-qwen-7b-qnn-npu:1","type":"Chat","device":"Npu",
+            "executionProvider":"QNNExecutionProvider"}]}"#,
+        )
+        .unwrap();
+        let m = &lire_catalogue_json(&v)[0];
+        assert_eq!(m.fournisseur.as_deref(), Some("QNNExecutionProvider"));
+        assert_eq!(
+            m.noms_connus(),
+            vec![
+                "deepseek-r1-7b".to_string(),
+                "DeepSeek-R1-Distill-Qwen-7B".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn un_catalogue_sans_npu_est_dit_clairement() {
+        // Le catalogue réel du PC x64 de développement (Foundry 0.11) : 101
+        // variantes, aucune NPU. Ici, un extrait.
+        let v = premier_json(
+            r#"{"variants":[
+            {"alias":"qwen2.5-0.5b","variantId":"qwen2.5-0.5b-instruct-generic-cpu:4","type":"Chat","device":"Cpu"},
+            {"alias":"qwen2.5-0.5b","variantId":"qwen2.5-0.5b-instruct-cuda-gpu:4","type":"Chat","device":"Gpu"}]}"#,
+        )
+        .unwrap();
+        let l = lire_catalogue_json(&v);
+        assert!(l.iter().all(|m| !m.est_npu()));
+        let b = bilan_catalogue(&l);
+        assert!(b.starts_with("Aucune variante NPU sur 2"), "{b}");
+        let avec = vec![ModeleFoundry {
+            alias: "phi-4-mini".into(),
+            id: "Phi-4-mini-instruct-qnn-npu:2".into(),
+            appareil: "NPU".into(),
+            ..Default::default()
+        }];
+        assert!(bilan_catalogue(&avec).starts_with("1 variante(s) NPU sur 1"));
+    }
+
+    #[test]
+    fn les_modeles_charges_portent_leur_appareil() {
+        let complet = premier_json(
+            r#"{"models":[{"alias":"qwen2.5-0.5b","id":"qwen2.5-0.5b-instruct-generic-cpu:4","type":"Chat","device":"Cpu"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(lire_charges_json(&complet)[0].appareil, "CPU");
+        // Les anciennes versions ne donnent que l'identifiant.
+        let ancien = serde_json::json!(["Phi-4-mini-instruct-qnn-npu:2"]);
+        assert_eq!(lire_charges_json(&ancien)[0].appareil, "NPU");
     }
 
     #[test]

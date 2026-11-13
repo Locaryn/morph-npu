@@ -6,7 +6,7 @@
 //! requêtes par le modèle chargé, et transmet le reste tel quel, flux SSE
 //! compris.
 
-use crate::foundry::Amont;
+use crate::foundry::{self, Amont, ModeleFoundry};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -33,8 +33,10 @@ pub struct Relais {
     /// Mode passerelle : les modèles servis (déjà téléchargés), et comment
     /// passer de l'un à l'autre. Vide : un seul modèle, celui chargé.
     modeles: Mutex<Vec<String>>,
-    /// Nom court de chaque modèle servi (`phi-4-mini`), par identifiant.
-    noms: Mutex<std::collections::HashMap<String, String>>,
+    /// La fiche du catalogue de chaque modèle servi, par identifiant.
+    fiches: Mutex<std::collections::HashMap<String, ModeleFoundry>>,
+    /// Ce qui tourne vraiment : la dernière variante servie avec succès.
+    execution: Mutex<Option<Execution>>,
     /// Ceux qui sont déjà téléchargés sur ce PC.
     installes: Mutex<std::collections::HashSet<String>>,
     /// Supprime un modèle téléchargé (`DELETE /v1/models/<id>`).
@@ -48,7 +50,8 @@ impl Relais {
             amont: Mutex::new(None),
             relance,
             modeles: Mutex::new(Vec::new()),
-            noms: Mutex::new(std::collections::HashMap::new()),
+            fiches: Mutex::new(std::collections::HashMap::new()),
+            execution: Mutex::new(None),
             installes: Mutex::new(std::collections::HashSet::new()),
             suppression: Mutex::new(None),
             changement: None,
@@ -62,7 +65,8 @@ impl Relais {
             amont: Mutex::new(None),
             relance,
             modeles: Mutex::new(Vec::new()),
-            noms: Mutex::new(std::collections::HashMap::new()),
+            fiches: Mutex::new(std::collections::HashMap::new()),
+            execution: Mutex::new(None),
             installes: Mutex::new(std::collections::HashSet::new()),
             suppression: Mutex::new(None),
             changement: Some(changement),
@@ -115,17 +119,58 @@ impl Relais {
                 }
             }
         }
+        if let Ok(mut e) = self.execution.lock() {
+            if e.as_ref().is_some_and(|x| meme_variante(id, &x.variante)) {
+                *e = None;
+            }
+        }
         Ok(())
     }
 
-    pub fn definir_noms(&self, noms: std::collections::HashMap<String, String>) {
-        if let Ok(mut n) = self.noms.lock() {
-            *n = noms;
+    /// Les fiches du catalogue des modèles servis.
+    pub fn definir_fiches(&self, fiches: Vec<ModeleFoundry>) {
+        if let Ok(mut f) = self.fiches.lock() {
+            *f = fiches.into_iter().map(|m| (m.id.clone(), m)).collect();
         }
     }
 
-    fn noms(&self) -> std::collections::HashMap<String, String> {
-        self.noms.lock().map(|n| n.clone()).unwrap_or_default()
+    fn fiches(&self) -> std::collections::HashMap<String, ModeleFoundry> {
+        self.fiches.lock().map(|f| f.clone()).unwrap_or_default()
+    }
+
+    /// Ce que Foundry rapporte des modèles chargés (`--loaded`). Une liste
+    /// vide ne prouve rien : Foundry 0.11 la rend vide même en servant.
+    pub fn definir_charges(&self, charges: &[ModeleFoundry]) {
+        let Some(m) = charges.first() else {
+            return;
+        };
+        if let Ok(mut e) = self.execution.lock() {
+            *e = Some(Execution::de(m, Source::Moteur));
+        }
+    }
+
+    /// Note la variante que Foundry vient de servir.
+    pub fn noter_service(&self, variante: &str) {
+        if variante.is_empty() {
+            return;
+        }
+        let fiche = self
+            .fiches()
+            .into_values()
+            .find(|f| meme_variante(&f.id, variante))
+            .unwrap_or_else(|| ModeleFoundry {
+                id: variante.to_string(),
+                ..Default::default()
+            });
+        let mut execution = Execution::de(&fiche, Source::VarianteServie);
+        execution.variante = variante.to_string();
+        if let Ok(mut e) = self.execution.lock() {
+            *e = Some(execution);
+        }
+    }
+
+    pub fn execution(&self) -> Option<Execution> {
+        self.execution.lock().ok().and_then(|e| e.clone())
     }
 
     fn modeles(&self) -> Vec<String> {
@@ -240,28 +285,113 @@ pub fn reecrire_modele(corps: &[u8], modele: &str) -> Vec<u8> {
     }
 }
 
-/// La liste `/v1/models` que voit l'hôte.
+/// Le nom du moteur, tel que l'application l'affiche.
+pub const MOTEUR: &str = "Foundry Local";
+
+/// D'où vient ce qu'on sait du modèle qui tourne.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// `foundry model list --loaded`.
+    Moteur,
+    /// La variante que la passerelle a envoyée à Foundry et qu'il a servie.
+    VarianteServie,
+}
+
+/// Le modèle qui tourne vraiment, et où.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Execution {
+    pub variante: String,
+    /// `NPU`, `GPU` ou `CPU`.
+    pub appareil: String,
+    pub fournisseur: Option<String>,
+    pub source: Source,
+}
+
+impl Execution {
+    pub fn de(m: &ModeleFoundry, source: Source) -> Self {
+        Self {
+            variante: m.id.clone(),
+            appareil: foundry::appareil_de(m),
+            fournisseur: m.fournisseur.clone(),
+            source,
+        }
+    }
+
+    /// Le bloc `runtime` d'une entrée de `/v1/models`.
+    pub fn en_json(&self) -> Value {
+        json!({
+            "engine": MOTEUR,
+            "device": self.appareil.to_ascii_lowercase(),
+            "execution_provider": self.fournisseur,
+            "variant": self.variante,
+            "source": match self.source {
+                Source::Moteur => "engine",
+                Source::VarianteServie => "served_variant",
+            },
+        })
+    }
+}
+
+/// Deux noms de variante désignent-ils la même (`Phi-4-mini-instruct-qnn-npu:2`
+/// et `phi-4-mini-instruct-qnn-npu`) ?
+pub fn meme_variante(a: &str, b: &str) -> bool {
+    let sans = |x: &str| x.split(':').next().unwrap_or(x).to_ascii_lowercase();
+    sans(a) == sans(b)
+}
+
+/// Une variante du catalogue est compilée pour son appareil : elle y tourne
+/// entièrement, sans partage avec un autre.
+const DEPORT_COMPLET: &str = "full";
+
+/// La liste `/v1/models` que voit l'hôte : pour chaque modèle, l'appareil de
+/// sa variante, les autres noms sous lesquels il est connu, et, pour celui
+/// qui tourne, où il tourne vraiment.
 pub fn liste_modeles(
     modeles: &[String],
-    noms: &std::collections::HashMap<String, String>,
+    fiches: &std::collections::HashMap<String, ModeleFoundry>,
     installes: &std::collections::HashSet<String>,
+    execution: Option<&Execution>,
 ) -> Value {
     json!({
         "object": "list",
         "data": modeles
             .iter()
-            .map(|m| {
-                let nom = noms.get(m).map_or(m.as_str(), String::as_str);
-                json!({
-                    "id": m,
-                    "name": nom,
-                    "object": "model",
-                    "owned_by": "foundry-local",
-                    "installed": installes.contains(m),
-                })
-            })
+            .map(|m| entree_modele(m, fiches.get(m), installes.contains(m), execution))
             .collect::<Vec<_>>()
     })
+}
+
+fn entree_modele(
+    id: &str,
+    fiche: Option<&ModeleFoundry>,
+    installe: bool,
+    execution: Option<&Execution>,
+) -> Value {
+    let mut v = json!({
+        "id": id,
+        "name": fiche.map_or(id, |f| f.alias.as_str()),
+        "object": "model",
+        "owned_by": "foundry-local",
+        "installed": installe,
+        "engine": MOTEUR,
+    });
+    if let Some(f) = fiche {
+        let appareil = foundry::appareil_de(f);
+        if !appareil.is_empty() {
+            v["device"] = json!(appareil.to_ascii_lowercase());
+            v["offload"] = json!(DEPORT_COMPLET);
+        }
+        if let Some(ep) = &f.fournisseur {
+            v["execution_provider"] = json!(ep);
+        }
+        v["aliases"] = json!(f.noms_connus());
+    }
+    let tourne = execution.filter(|e| meme_variante(id, &e.variante));
+    v["loaded"] = json!(tourne.is_some());
+    if let Some(e) = tourne {
+        v["runtime"] = e.en_json();
+    }
+    v
 }
 
 /// Le champ `model` d'un corps JSON.
@@ -354,6 +484,9 @@ fn transmettre(relais: &Relais, req: &Requete, s: &mut TcpStream) -> std::io::Re
     match reponse {
         Ok(r) => {
             let code = r.status();
+            if code == 200 && req.chemin.contains("/completions") {
+                relais.noter_service(&amont.modele);
+            }
             let t = r.content_type().to_string();
             ecrire_entete(s, code, &t)?;
             std::io::copy(&mut r.into_reader(), s)?;
@@ -374,22 +507,42 @@ fn servir_connexion(relais: &Relais, mut s: TcpStream) -> std::io::Result<()> {
     };
     let chemin = req.chemin.split('?').next().unwrap_or("");
     match (req.methode.as_str(), chemin) {
-        ("GET", "/health") => match relais.courant() {
-            Some(_) => repondre_json(&mut s, 200, &json!({"status": "ok"})),
-            None => repondre_json(&mut s, 503, &json!({"status": "loading"})),
-        },
+        ("GET", "/health") => {
+            // L'hôte lance la passerelle dans son dossier : son journal y est.
+            let journal = std::env::current_dir()
+                .map(|d| d.join("gateway.log").display().to_string())
+                .unwrap_or_default();
+            match relais.courant() {
+                Some(_) => repondre_json(
+                    &mut s,
+                    200,
+                    &json!({"status": "ok", "log": journal, "models": relais.modeles().len()}),
+                ),
+                None => repondre_json(&mut s, 503, &json!({"status": "loading", "log": journal})),
+            }
+        }
         ("GET", "/v1/models") => {
             let servis = relais.modeles();
             match relais.courant() {
                 _ if !servis.is_empty() => repondre_json(
                     &mut s,
                     200,
-                    &liste_modeles(&servis, &relais.noms(), &relais.installes()),
+                    &liste_modeles(
+                        &servis,
+                        &relais.fiches(),
+                        &relais.installes(),
+                        relais.execution().as_ref(),
+                    ),
                 ),
                 Some(a) => repondre_json(
                     &mut s,
                     200,
-                    &liste_modeles(&[a.modele], &relais.noms(), &relais.installes()),
+                    &liste_modeles(
+                        &[a.modele],
+                        &relais.fiches(),
+                        &relais.installes(),
+                        relais.execution().as_ref(),
+                    ),
                 ),
                 None => repondre_json(&mut s, 503, &json!({"object": "list", "data": []})),
             }
@@ -494,6 +647,73 @@ mod tests {
             .into_json()
             .unwrap();
         assert_eq!(v["data"][0]["id"], "phi-npu");
+    }
+
+    fn fiche(alias: &str, variante: &str, id: &str, appareil: &str, ep: &str) -> ModeleFoundry {
+        ModeleFoundry {
+            alias: alias.into(),
+            id: id.into(),
+            appareil: appareil.into(),
+            fournisseur: Some(ep.into()),
+            variante: Some(variante.into()),
+            taille_mo: None,
+        }
+    }
+
+    #[test]
+    fn la_liste_dit_l_appareil_les_autres_noms_et_ce_qui_tourne() {
+        let relais = Relais::new(Box::new(|| Err("pas de relance en test".into())));
+        relais.definir_fiches(vec![fiche(
+            "deepseek-r1-7b",
+            "DeepSeek-R1-Distill-Qwen-7B-qnn-npu",
+            "deepseek-r1-distill-qwen-7b-qnn-npu:1",
+            "NPU",
+            "QNNExecutionProvider",
+        )]);
+        let ids = vec!["deepseek-r1-distill-qwen-7b-qnn-npu:1".to_string()];
+        let v = liste_modeles(&ids, &relais.fiches(), &Default::default(), None);
+        let m = &v["data"][0];
+        assert_eq!(m["name"], "deepseek-r1-7b");
+        assert_eq!(m["device"], "npu");
+        assert_eq!(m["offload"], "full");
+        assert_eq!(m["engine"], "Foundry Local");
+        assert_eq!(m["loaded"], false);
+        let alias: Vec<&str> = m["aliases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(alias.contains(&"DeepSeek-R1-Distill-Qwen-7B"), "{alias:?}");
+
+        // Foundry vient de servir cette variante : elle tourne, sur le NPU.
+        relais.noter_service("deepseek-r1-distill-qwen-7b-qnn-npu:1");
+        let e = relais.execution();
+        let v = liste_modeles(&ids, &relais.fiches(), &Default::default(), e.as_ref());
+        let r = &v["data"][0]["runtime"];
+        assert_eq!(v["data"][0]["loaded"], true);
+        assert_eq!(r["device"], "npu");
+        assert_eq!(r["execution_provider"], "QNNExecutionProvider");
+        assert_eq!(r["source"], "served_variant");
+    }
+
+    #[test]
+    fn foundry_qui_declare_un_repli_cpu_l_emporte() {
+        let relais = Relais::new(Box::new(|| Err("pas de relance en test".into())));
+        relais.noter_service("phi-4-mini-instruct-qnn-npu:2");
+        relais.definir_charges(&[fiche(
+            "phi-4-mini",
+            "Phi-4-mini-instruct-generic-cpu",
+            "Phi-4-mini-instruct-generic-cpu:1",
+            "CPU",
+            "CPUExecutionProvider",
+        )]);
+        let e = relais.execution().unwrap();
+        assert_eq!(e.appareil, "CPU");
+        assert_eq!(e.source, Source::Moteur);
+        // Une liste vide (Foundry 0.11) n'efface pas ce qu'on sait.
+        relais.definir_charges(&[]);
+        assert!(relais.execution().is_some());
     }
 
     /// Un faux service Foundry : renvoie le corps reçu, en flux SSE.

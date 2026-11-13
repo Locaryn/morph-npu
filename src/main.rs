@@ -163,12 +163,14 @@ fn serve_foundry(argv: &[String], ctx: &Contexte) -> Result<u8, String> {
         .map(|()| 0)
 }
 
-/// Les identifiants servis : tous les modèles NPU du catalogue.
-fn servis(exe: &Path, base: &str) -> Result<Vec<(String, String)>, String> {
-    Ok(foundry::npu_du_catalogue(exe, base)?
-        .into_iter()
-        .map(|m| (m.id, m.alias))
-        .collect())
+/// Les modèles servis : tous les modèles NPU du catalogue. Le journal dit
+/// clairement quand il n'y en a aucun, et pourquoi c'est probable.
+fn servis(exe: &Path, base: &str) -> Result<Vec<foundry::ModeleFoundry>, String> {
+    let catalogue = foundry::catalogue(exe, base)?;
+    let npu: Vec<foundry::ModeleFoundry> =
+        catalogue.iter().filter(|m| m.est_npu()).cloned().collect();
+    eprintln!("[npu] {}", foundry::bilan_catalogue(&catalogue));
+    Ok(npu)
 }
 
 /// Parmi `ids`, ceux qui sont déjà dans le cache de Foundry.
@@ -254,20 +256,26 @@ fn passerelle(argv: &[String]) -> Result<u8, String> {
     );
     let modeles = servis(&exe, &base)?;
     eprintln!(
-        "[npu] passerelle Foundry sur 127.0.0.1:{port} : {} modèle(s) NPU au catalogue",
+        "[npu] passerelle Foundry sur 127.0.0.1:{port} : {} modèle(s) servis",
         modeles.len()
     );
-    relais.definir_noms(modeles.iter().cloned().collect());
-    let ids: Vec<String> = modeles.into_iter().map(|(id, _)| id).collect();
+    let ids: Vec<String> = modeles.iter().map(|m| m.id.clone()).collect();
+    relais.definir_fiches(modeles);
     relais.definir_installes(telecharges(&exe, &ids));
     relais.definir_modeles(ids.clone());
     let exe_suppr = exe.clone();
     relais.definir_suppression(Box::new(move |id| foundry::supprimer(&exe_suppr, id)));
-    // Un téléchargement qui finit doit se voir sans relancer la passerelle.
-    let (suivi, exe_suivi) = (std::sync::Arc::clone(&relais), exe.clone());
+    // Un téléchargement qui finit doit se voir sans relancer la passerelle ;
+    // ce que Foundry dit du modèle chargé aussi.
+    let (suivi, exe_suivi, base_suivi) =
+        (std::sync::Arc::clone(&relais), exe.clone(), base.clone());
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(20));
         suivi.definir_installes(telecharges(&exe_suivi, &ids));
+        match foundry::charges_details(&exe_suivi, &base_suivi) {
+            Ok(charges) => suivi.definir_charges(&charges),
+            Err(e) => eprintln!("[npu] modèles chargés illisibles : {e}"),
+        }
     });
     relais.definir(foundry::Amont {
         base,

@@ -57,9 +57,36 @@ Réglages : `backend` (`foundry` par défaut, ou `llamacpp`), `foundry_model` (`
 
 Outils MCP (boutons des réglages) : `npu_etat` (Vérifier), `npu_modeles`, `npu_foundry_installer`, `npu_activer`.
 
+## Compatibilité NPU : ce que disent les étiquettes
+
+La source de vérité est le catalogue de Foundry (`foundry model list --variants -o json`, champ `device`). La passerelle publie dans `/v1/models`, pour chaque modèle : `device` (`npu`), `offload` (`full`), `engine`, `execution_provider` (`QNNExecutionProvider`), `aliases` (l'alias Foundry et le nom long de la variante, par exemple `DeepSeek-R1-Distill-Qwen-7B` pour `deepseek-r1-7b`) et, pour celui qui tourne, `loaded` et `runtime` (appareil réel).
+
+- **NPU** : le modèle a une variante NPU au catalogue Foundry de ce PC ; il tourne entièrement sur le NPU.
+- **NPU partiel** : un GGUF jusqu'à 14 milliards de paramètres (`accelerated_files` du manifeste). En mode llama.cpp Hexagon, une partie des calculs seulement passe sur le NPU, et il faut le mode test-signing. La limite de 14B est un choix prudent du morph : elle n'a pas été mesurée sur un vrai NPU.
+- **Aucune étiquette** : pas de variante NPU, et trop gros ou taille inconnue.
+
+Foundry ne montre que les variantes que ce PC peut faire tourner : sans NPU Snapdragon vu, le catalogue ne contient **aucune** variante NPU (cas du PC x64 de développement : 101 variantes, 0 NPU). La passerelle le dit dans son journal et le bouton « Vérifier » aussi.
+
+### Ce qui tourne vraiment
+
+Foundry 0.11 rend `foundry model list --loaded` vide, même pendant qu'il sert un modèle (vérifié le 13/11/2026). La passerelle retient donc la variante qu'elle vient de faire servir (le champ `model` de la réponse). L'appareil vient de la fiche de cette variante au catalogue. Elle préfère `--loaded` quand une version de Foundry le remplit. L'application affiche cet appareil dans la barre de conversation, et signale un repli (annoncé NPU, servi CPU).
+
+### Vérifier
+
+« Vérifier » répond, ligne par ligne :
+- Foundry est-il installé (chemin, version) ?
+- Windows voit-il un NPU (classe `ComputeAccelerator`) ?
+- Combien de variantes NPU le catalogue contient-il ?
+- Quel modèle est chargé, et sur quel appareil ?
+- Où est le journal de la passerelle (`gateways/npu/gateway.log` dans le dossier de données de Locaryn) ?
+
+### Gros modèles (Qwen3.8 27B…)
+
+Le catalogue Foundry vu d'un PC x64 contient `qwen3.8-27b`, mais seulement en variante GPU CUDA (18 Go, type « Unknown », non listée comme modèle de conversation). Les variantes NPU (QNN) publiées par Foundry sont de petits modèles. Sans variante QNN, un 27B ne tournera pas sur le NPU d'un Snapdragon X. En GGUF par llama.cpp Hexagon, il dépasse la limite de 14B : il reste le CPU, lent.
+
 ## Statut
 
-Version `0.1.0-beta.3`. La mécanique Foundry (CLI 0.11 : démarrage, catalogue, chargement, relais d'une conversation en flux) est vérifiée sur un PC x64 avec un modèle CPU. **Le chargement sur un vrai NPU Snapdragon reste à confirmer** sur matériel.
+Version `0.1.0-beta.8`. La mécanique Foundry (CLI 0.11 : démarrage, catalogue, chargement, relais d'une conversation en flux, appareil réel rapporté) est vérifiée sur un PC x64, avec un modèle CPU en mode essai (`LOCARYN_NPU_APPAREIL_ESSAI=cpu`). **Le chargement sur un vrai NPU Snapdragon reste à confirmer** sur matériel.
 
 ## Développement
 

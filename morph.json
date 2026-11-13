@@ -2,7 +2,7 @@
   "$schema": "https://locaryn.dev/schema/morph.json/v0.1",
   "apiVersion": "0.1",
   "name": "morph-npu",
-  "version": "0.1.0-beta.7",
+  "version": "0.1.0-beta.8",
   "description": "NPU Snapdragon (Windows ARM64). Une fois le morph installé, les modèles compatibles NPU apparaissent dans la liste des modèles : choisissez-en un, il se télécharge puis tourne sur le NPU (Microsoft Foundry Local, pilote signé de Qualcomm, sans mode test ni Secure Boot à couper). Les modèles sont rangés dans le dossier de modèles de Locaryn. En option, llama.cpp Hexagon pour les fichiers GGUF (exige le mode test-signing).",
   "author": "Locaryn Team",
   "license": "Apache-2.0",
@@ -94,7 +94,7 @@
             "label": "Vérifier",
             "kind": "action",
             "tool": "npu_etat",
-            "hint": "Dit si le NPU est réellement utilisé, et par quel modèle."
+            "hint": "Diagnostic en clair : Foundry installé ou non, NPU vu par Windows, nombre de modèles NPU au catalogue, modèle chargé et appareil réel, chemin du journal."
           }
         ]
       },
@@ -146,7 +146,16 @@
       "start_timeout_seconds": 600,
       "install_hint": "Windows 11 ARM64 (Snapdragon X). Foundry Local s'installe seul au premier démarrage."
     },
-    "inline_models": true
+    "inline_models": true,
+    "accelerated_files": [
+      {
+        "formats": ["gguf"],
+        "device": "npu",
+        "offload": "partial",
+        "max_params_b": 14,
+        "note": "en mode llama.cpp Hexagon, une partie des calculs passe sur le NPU, le reste sur le CPU ; exige le mode test-signing de Windows (réglages du morph). Limite de taille choisie par le morph, non mesurée sur un vrai NPU."
+      }
+    ]
   },
   "engine": {
     "id": "npu",
@@ -196,6 +205,14 @@
   "beta": true,
   "stability": "untested",
   "versions": [
+    {
+      "version": "0.1.0-beta.8",
+      "is_beta": true,
+      "summary": "Compatibilité NPU vérifiable : chaque modèle publie l'appareil de sa variante et ses noms longs, la passerelle dit sur quel appareil le modèle tourne vraiment, « Vérifier » donne un diagnostic complet (Foundry, NPU vu, catalogue, modèle chargé, journal)",
+      "tag": "v0.1.0-beta.8",
+      "released_at": "2026-11-13",
+      "install_source": "Locaryn/morph-npu#v0.1.0-beta.8"
+    },
     {
       "version": "0.1.0-beta.7",
       "is_beta": true,

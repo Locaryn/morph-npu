@@ -10,7 +10,7 @@
 //!   seulement si Windows l'exige).
 
 use locaryn_plugin_npu::backend::{self, Backend};
-use locaryn_plugin_npu::{foundry, settings};
+use locaryn_plugin_npu::{diagnostic, foundry, settings};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -106,7 +106,7 @@ fn outils() -> Value {
         },
         {
             "name": "npu_etat",
-            "description": "Dit si le NPU est utilisé : modèle chargé par Foundry Local et son appareil, ou mode test-signing pour llama.cpp.",
+            "description": "Diagnostic du NPU : Foundry installé, NPU vu par Windows, nombre de modèles NPU au catalogue, modèle chargé et son appareil réel, chemin du journal de la passerelle.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -198,60 +198,139 @@ fn backend_choisi() -> Result<Backend, String> {
     backend::choose(&r.backend, "windows", "aarch64")
 }
 
+/// Le port de la passerelle, celui que `morph.json` déclare.
+const PORT_PASSERELLE: u16 = 8190;
+
+/// « Vérifier » : tout le chemin, de l'installation au modèle qui tourne.
 fn etat() -> Result<Value, String> {
     if !cfg!(windows) {
         return Err("Le NPU Snapdragon n'existe que sous Windows.".into());
     }
-    match backend_choisi()? {
-        Backend::Foundry => etat_foundry(),
-        Backend::Npu => etat_test_signing(),
-    }
-}
-
-/// Un modèle Foundry tourne sur le NPU quand sa variante est QNN/NPU.
-fn sur_npu(nom: &str) -> bool {
-    let n = nom.to_ascii_lowercase();
-    n.contains("npu") || n.contains("qnn")
-}
-
-fn message_foundry(charges: &[String]) -> (bool, String) {
-    let npu: Vec<&String> = charges.iter().filter(|c| sur_npu(c)).collect();
-    if let Some(m) = npu.first() {
-        return (
-            true,
-            format!("Le NPU est utilisé : {m} tourne sur le NPU (fournisseur QNN de Qualcomm, sans mode test)."),
-        );
-    }
-    if let Some(m) = charges.first() {
-        return (
-            false,
-            format!("{m} est chargé, mais pas sur le NPU (variante CPU ou GPU). Choisissez un modèle NPU dans « Modèle Foundry »."),
-        );
-    }
-    (
-        false,
-        "Foundry Local tourne, mais aucun modèle n'est chargé : choisissez un modèle NPU dans la liste des modèles.".into(),
-    )
-}
-
-fn etat_foundry() -> Result<Value, String> {
-    let Some(exe) = foundry::trouver() else {
-        return Ok(json!({
-            "npu_utilise": false,
-            "message": "Foundry Local n'est pas installé. Il s'installe au premier lancement du moteur, ou cliquez « Installer Foundry Local »."
-        }));
+    let test_signing = match backend_choisi()? {
+        Backend::Foundry => None,
+        Backend::Npu => etat_test_signing()?["npu_autorise"].as_bool(),
     };
-    let Some(url) = foundry::url_service(&exe) else {
-        return Ok(json!({
-            "npu_utilise": false,
-            "message": "Foundry Local est installé mais arrêté : choisissez un modèle NPU dans la liste des modèles."
-        }));
+    let exe = foundry::trouver();
+    let foundry_vu = exe.as_deref().map(|e| {
+        let version = foundry::executer(e, &["--version"])
+            .map(|o| {
+                foundry::sans_ansi(&String::from_utf8_lossy(&o.stdout))
+                    .trim()
+                    .to_string()
+            })
+            .unwrap_or_default();
+        format!(
+            "{}, version {}",
+            e.display(),
+            if version.is_empty() { "?" } else { &version }
+        )
+    });
+    let (catalogue, charges) = match &exe {
+        Some(e) => catalogue_et_charges(e),
+        None => (Err("Foundry absent".into()), Vec::new()),
     };
-    let charges = foundry::modeles_charges(&exe, &url)?;
-    let (actif, message) = message_foundry(&charges);
-    Ok(
-        json!({ "npu_utilise": actif, "modeles_charges": charges, "service": url, "message": message }),
-    )
+    let liste = passerelle_json("/v1/models");
+    let execution = charges
+        .first()
+        .map(|m| diagnostic::Execution {
+            variante: m.id.clone(),
+            appareil: foundry::appareil_de(m),
+            fournisseur: m.fournisseur.clone(),
+            declare_par_le_moteur: true,
+        })
+        .or_else(|| {
+            liste
+                .as_ref()
+                .and_then(diagnostic::lire_execution_passerelle)
+        });
+    let constat = diagnostic::Constat {
+        foundry: foundry_vu,
+        npu_windows: npu_windows(),
+        catalogue,
+        execution,
+        passerelle: etat_passerelle(),
+        test_signing,
+    };
+    let d = diagnostic::rediger(&constat);
+    Ok(json!({ "npu_utilise": d.npu_utilise, "lignes": d.lignes, "message": d.message() }))
+}
+
+/// Le catalogue complet (pour compter les variantes NPU) et ce que Foundry
+/// déclare avoir chargé. Démarre le service s'il dort.
+fn catalogue_et_charges(
+    exe: &std::path::Path,
+) -> (
+    Result<Vec<foundry::ModeleFoundry>, String>,
+    Vec<foundry::ModeleFoundry>,
+) {
+    let base = match foundry::demarrer(exe) {
+        Ok(b) => b,
+        Err(e) => return (Err(e), Vec::new()),
+    };
+    let charges = foundry::charges_details(exe, &base).unwrap_or_else(|e| {
+        eprintln!("[npu-mcp] modèles chargés illisibles : {e}");
+        Vec::new()
+    });
+    (foundry::catalogue(exe, &base), charges)
+}
+
+/// Un GET sur la passerelle locale ; `None` si elle ne répond pas.
+fn passerelle_json(chemin: &str) -> Option<Value> {
+    let url = format!("http://127.0.0.1:{PORT_PASSERELLE}{chemin}");
+    let reponse = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .get(&url)
+        .call();
+    match reponse {
+        Ok(r) | Err(ureq::Error::Status(_, r)) => r.into_json().ok(),
+        Err(e) => {
+            eprintln!("[npu-mcp] passerelle muette ({url}) : {e}");
+            None
+        }
+    }
+}
+
+fn etat_passerelle() -> diagnostic::Passerelle {
+    let Some(v) = passerelle_json("/health") else {
+        return diagnostic::Passerelle::Muette;
+    };
+    let journal = v["log"].as_str().unwrap_or("gateway.log").to_string();
+    if v["status"].as_str() == Some("ok") {
+        diagnostic::Passerelle::Prete { journal }
+    } else {
+        diagnostic::Passerelle::Demarre { journal }
+    }
+}
+
+/// Les accélérateurs d'IA que Windows déclare (classe « ComputeAccelerator »
+/// ou nom contenant NPU) ; `None` si PowerShell ne répond pas.
+fn npu_windows() -> Option<Vec<String>> {
+    let mut c = Command::new("powershell.exe");
+    c.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -eq 'ComputeAccelerator' \
+         -or $_.Name -match '\\bNPU\\b' } | ForEach-Object { $_.Name }",
+    ]);
+    sans_console(&mut c);
+    match c.output() {
+        Ok(o) if o.status.success() => Some(diagnostic::lire_npu_windows(
+            &String::from_utf8_lossy(&o.stdout),
+        )),
+        Ok(o) => {
+            eprintln!(
+                "[npu-mcp] accélérateurs illisibles : {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            None
+        }
+        Err(e) => {
+            eprintln!("[npu-mcp] PowerShell introuvable : {e}");
+            None
+        }
+    }
 }
 
 /// Foundry installé et démarré, ou un message qui dit quoi faire.
@@ -416,17 +495,6 @@ fn etat_test_signing() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn un_modele_qnn_est_reconnu_sur_le_npu() {
-        let (actif, m) = message_foundry(&["Phi-4-mini-instruct-qnn-npu:2".into()]);
-        assert!(actif);
-        assert!(m.contains("NPU est utilisé"));
-        let (actif, m) = message_foundry(&["Phi-4-mini-instruct-generic-cpu".into()]);
-        assert!(!actif);
-        assert!(m.contains("pas sur le NPU"));
-        assert!(!message_foundry(&[]).0);
-    }
 
     #[test]
     fn les_outils_des_reglages_sont_declares() {
